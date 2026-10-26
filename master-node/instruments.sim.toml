@@ -1,0 +1,49 @@
+# Instrument registry for trying everything on one PC: every instrument simulated.
+# See instruments.example.toml for the lab's real addresses and every option.
+
+[[instrument]]
+id = "thor"
+kind = "transport"
+name = "Jetson Thor"
+driver = "sim"
+clear_timeout_s = 30.0
+
+[[instrument]]
+id = "flex"
+kind = "liquid_handler"
+name = "Opentrons Flex"
+driver = "sim"
+plate_slots = ["B1", "B2", "B3", "C1", "C2", "C3", "D1", "D2"]
+default_slot = "B1"
+timeout_s = 14400.0
+
+[[instrument]]
+id = "tecan"
+kind = "plate_reader"
+name = "Tecan Infinite M200 Pro"
+driver = "sim"
+plate_slots = ["carrier"]
+timeout_s = 1800.0
+[instrument.limits]
+modes = ["absorbance", "fluorescence", "luminescence"]
+wavelength_nm = [230, 1000]
+max_wavelengths = 10
+excitation_nm = [230, 850]
+emission_nm = [280, 850]
+integration_ms = [1, 10000]
+
+[[instrument]]
+id = "washer"
+kind = "plate_washer"
+name = "Plate washer"
+driver = "sim"
+[instrument.limits]
+max_volume_ul = 400
+max_cycles = 10
+
+[[instrument]]
+id = "qpcr"
+kind = "qpcr"
+name = "qPCR"
+driver = "sim"
+timeout_s = 10800.0

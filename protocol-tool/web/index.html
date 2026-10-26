@@ -1,0 +1,285 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Protocol Tool</title>
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Crect x='3' y='6' width='18' height='12' rx='2.5' fill='none' stroke='%232a78d6' stroke-width='2'/%3E%3Ccircle cx='8' cy='12' r='1.7' fill='%232a78d6'/%3E%3Ccircle cx='12' cy='12' r='1.7' fill='%232a78d6'/%3E%3Ccircle cx='16' cy='12' r='1.7' fill='%232a78d6'/%3E%3C/svg%3E">
+  <link rel="stylesheet" href="styles.css">
+  <script type="module" src="js/main.js"></script>
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand">
+      <svg viewBox="0 0 24 24" aria-hidden="true" class="brand-icon">
+        <rect x="3" y="6" width="18" height="12" rx="2.5" fill="none" stroke="currentColor" stroke-width="1.6"/>
+        <circle cx="8" cy="10" r="1.3" fill="currentColor"/><circle cx="12" cy="10" r="1.3" fill="currentColor"/><circle cx="16" cy="10" r="1.3" fill="currentColor"/>
+        <circle cx="8" cy="14" r="1.3" fill="currentColor"/><circle cx="12" cy="14" r="1.3" fill="currentColor"/><circle cx="16" cy="14" r="1.3" fill="currentColor"/>
+      </svg>
+      <h1>Protocol tool</h1>
+    </div>
+    <nav class="tabs" role="tablist" aria-label="Views">
+      <button type="button" role="tab" id="tab-design" aria-controls="view-design" aria-selected="true">Design</button>
+      <button type="button" role="tab" id="tab-runs" aria-controls="view-runs" aria-selected="false">Runs</button>
+    </nav>
+    <div class="status-group">
+      <span class="device" id="claude-chip" hidden></span>
+      <ul class="devices" id="devices" aria-label="Lab status"></ul>
+    </div>
+  </header>
+
+  <!-- Design: chat on the left; deck, plate reader and send on the right -->
+  <main id="view-design" class="view-design" role="tabpanel" aria-labelledby="tab-design">
+    <section class="panel chat-panel" aria-label="Chat with the AI assistant">
+      <div class="panel-head">
+        <div>
+          <h2>Design with <span class="assistant-name">AI</span></h2>
+          <p class="muted small">Describe the experiment or attach a protocol PDF. <span class="assistant-name">The assistant</span> plans the workflow and writes and simulates the Flex protocols.</p>
+        </div>
+        <button type="button" class="btn ghost small" id="new-design">New design</button>
+      </div>
+      <div class="notice" id="claude-banner" role="alert" hidden>
+        <div><strong><span class="assistant-name">The AI model</span> isn't connected.</strong> <span id="claude-banner-text"></span></div>
+        <button type="button" class="btn ghost small" id="claude-recheck">Check again</button>
+      </div>
+      <div class="messages" id="messages" aria-live="polite"></div>
+      <form class="composer" id="composer">
+        <ul class="attachments" id="attachments" aria-label="Attached files"></ul>
+        <div class="composer-row">
+          <button type="button" class="icon-btn" id="attach-btn" title="Attach PDF, image or text file" aria-label="Attach files">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M20 11.5 12.4 19a5 5 0 0 1-7.1-7.1l7.9-7.8a3.3 3.3 0 0 1 4.7 4.7l-7.9 7.8a1.7 1.7 0 0 1-2.4-2.4l7.2-7.1" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/></svg>
+          </button>
+          <input type="file" id="file-input" multiple hidden accept=".pdf,.png,.jpg,.jpeg,.gif,.webp,.txt,.csv,.md,.py,.json">
+          <textarea id="chat-input" rows="1" placeholder="e.g. Two-fold serial dilution of a dye across a 96-well plate, then read absorbance at 600 nm" aria-label="Message"></textarea>
+          <button type="submit" class="btn primary" id="send-chat">Send</button>
+        </div>
+      </form>
+    </section>
+
+    <div class="side">
+      <section class="panel" aria-labelledby="workflow-title">
+        <div class="panel-head">
+          <div>
+            <h2 id="workflow-title">Workflow</h2>
+            <p class="muted small">The steps done to the sample plate, in order. The master node picks an instrument for each and moves the plate between them.</p>
+          </div>
+        </div>
+        <details class="requirements" id="requirements" hidden>
+          <summary>Requirements <span class="muted" id="requirements-sub"></span></summary>
+          <dl id="requirements-body"></dl>
+        </details>
+        <ol class="workflow" id="workflow"></ol>
+        <p class="empty" id="workflow-empty">Fills in as <span class="assistant-name">the assistant</span> plans the experiment.</p>
+        <div class="analysis-plan" id="analysis-plan" hidden>
+          <span class="field-label">Results</span>
+          <ul id="analysis-plan-list"></ul>
+        </div>
+      </section>
+
+      <section class="panel" aria-labelledby="deck-title">
+        <div class="panel-head">
+          <div>
+            <h2 id="deck-title">Flex deck</h2>
+            <p class="muted small" id="deck-caption"></p>
+          </div>
+          <div class="head-actions">
+            <select id="protocol-select" aria-label="Protocol" hidden></select>
+            <span id="sim-pill"></span>
+            <button type="button" class="btn ghost small" id="show-steps" disabled>Steps</button>
+            <button type="button" class="btn ghost small" id="show-code" disabled>Code</button>
+          </div>
+        </div>
+        <div class="deck" id="deck"></div>
+        <div class="deck-meta" id="deck-meta"></div>
+      </section>
+
+      <section class="panel" id="reader-panel" aria-labelledby="reader-title" hidden>
+        <div class="panel-head">
+          <div>
+            <h2 id="reader-title">Plate reader</h2>
+            <p class="muted small"><span id="reader-caption"></span> <span class="assistant-name">The assistant</span> fills this in; you can change it.</p>
+          </div>
+          <span class="muted small" id="reader-saved" aria-live="polite"></span>
+        </div>
+        <div class="segmented" role="radiogroup" aria-label="Measurement mode" id="reader-mode">
+          <button type="button" role="radio" data-mode="absorbance">Absorbance</button>
+          <button type="button" role="radio" data-mode="fluorescence">Fluorescence</button>
+          <button type="button" role="radio" data-mode="luminescence">Luminescence</button>
+        </div>
+        <div class="reader-fields" id="reader-fields">
+          <label data-modes="absorbance">Wavelengths (nm)
+            <input id="r-wavelengths" inputmode="numeric" placeholder="600, 450">
+          </label>
+          <label data-modes="fluorescence">Excitation (nm)
+            <input id="r-excitation" type="number" min="230" max="850" placeholder="485">
+          </label>
+          <label data-modes="fluorescence">Emission (nm)
+            <input id="r-emission" type="number" min="280" max="850" placeholder="535">
+          </label>
+          <label data-modes="fluorescence">Gain
+            <input id="r-gain" type="number" min="1" max="255" placeholder="Default (100)">
+          </label>
+          <label data-modes="luminescence">Integration (ms)
+            <input id="r-integration" type="number" min="1" max="10000">
+          </label>
+          <label data-modes="absorbance fluorescence luminescence">Flashes
+            <input id="r-flashes" type="number" min="1" max="100">
+          </label>
+        </div>
+        <div class="wells-head">
+          <span class="field-label">Wells to read <span class="muted" id="well-count"></span></span>
+          <div class="head-actions">
+            <button type="button" class="btn ghost small" id="wells-all">All</button>
+            <button type="button" class="btn ghost small" id="wells-none">None</button>
+          </div>
+        </div>
+        <div class="well-picker-wrap">
+          <div class="well-picker" id="well-picker" aria-label="Wells to read. Click or drag to select; click a row or column label to toggle it."></div>
+        </div>
+        <p class="form-error" id="reader-error" role="alert" hidden></p>
+      </section>
+
+      <section class="panel" aria-labelledby="send-title">
+        <h2 id="send-title">Review and send</h2>
+        <p class="sim-status" id="sim-status"></p>
+        <form id="send-form" class="send-form" novalidate>
+          <label>Run name
+            <input name="name" required maxlength="120">
+          </label>
+          <label>Scientist
+            <input name="scientist" required maxlength="80" autocomplete="name">
+          </label>
+          <label><span>Plate storage slot <span class="optional">where Thor fetches it</span></span>
+            <input name="storage_slot" required maxlength="32" placeholder="R1-S3">
+          </label>
+          <label><span>Plate barcode <span class="optional">optional</span></span>
+            <input name="barcode" maxlength="64">
+          </label>
+          <label class="wide"><span>Notes for the lab <span class="optional">optional</span></span>
+            <textarea name="notes" rows="2" maxlength="1500"></textarea>
+          </label>
+          <p class="form-error wide" id="send-error" role="alert" hidden></p>
+          <p class="form-ok wide" id="send-ok" role="status" hidden></p>
+          <div class="send-actions wide">
+            <button type="button" class="btn ghost" id="simulate-btn">Run simulation</button>
+            <button type="submit" class="btn primary" id="send-btn">Review plan…</button>
+          </div>
+        </form>
+      </section>
+    </div>
+  </main>
+
+  <!-- Runs: what the master node is doing -->
+  <main id="view-runs" class="view-runs" role="tabpanel" aria-labelledby="tab-runs" hidden>
+    <div class="runs-side">
+      <section class="panel" aria-labelledby="runs-title">
+        <div class="panel-head">
+          <h2 id="runs-title">Runs</h2>
+          <span class="muted small" id="runs-updated"></span>
+        </div>
+        <ul class="runs" id="runs"></ul>
+        <p class="empty" id="runs-empty">No runs yet.</p>
+      </section>
+
+      <section class="panel" aria-labelledby="tips-title">
+        <div class="panel-head">
+          <div>
+            <h2 id="tips-title">Tip racks on the Flex</h2>
+            <p class="muted small">Runs continue partly used racks. Click New rack after putting in a full one.</p>
+          </div>
+        </div>
+        <ul class="tip-racks" id="tip-racks"></ul>
+        <p class="empty" id="tips-empty">None recorded yet. Racks appear after the first run that uses tips.</p>
+      </section>
+    </div>
+
+    <section class="panel" id="run-detail" aria-live="polite" hidden>
+      <div class="panel-head">
+        <div>
+          <h2 id="run-title"></h2>
+          <p class="muted small" id="run-meta"></p>
+        </div>
+        <div class="head-actions">
+          <span id="run-status"></span>
+          <button type="button" class="btn ghost" id="open-design-btn" hidden title="Open this run's design on the Design tab, to change it with the AI or send it again">Open in Design</button>
+          <button type="button" class="btn danger" id="abort-btn" hidden>Abort</button>
+        </div>
+      </div>
+      <p class="run-error" id="run-error" hidden></p>
+      <div class="notice info" id="manual-move" role="alert" hidden>
+        <div><strong>Move the plate by hand.</strong> <span id="manual-move-text"></span></div>
+        <button type="button" class="btn primary small" id="plate-moved">Plate moved</button>
+      </div>
+      <ol class="steps" id="steps"></ol>
+      <div id="analysis" hidden>
+        <div class="panel-head results-head">
+          <h3>Analysis</h3>
+          <div class="head-actions">
+            <button type="button" class="btn ghost small" id="analysis-csv">Download analysis CSV</button>
+          </div>
+        </div>
+        <div id="analysis-view"></div>
+      </div>
+      <div id="results" hidden>
+        <div class="panel-head results-head">
+          <h3>Results</h3>
+          <div class="head-actions">
+            <select id="measurement" aria-label="Measurement" hidden></select>
+            <button type="button" class="btn ghost small" id="toggle-table" aria-pressed="false">Table</button>
+            <button type="button" class="btn ghost small" id="csv-btn">Download CSV</button>
+          </div>
+        </div>
+        <div id="plate-view"></div>
+      </div>
+      <div class="explain" id="explain" hidden>
+        <div class="panel-head">
+          <h3>Summary</h3>
+          <button type="button" class="btn ghost small" id="explain-btn">Explain</button>
+        </div>
+        <p class="explain-text" id="explain-text"></p>
+      </div>
+      <details class="events">
+        <summary>Event log <span class="muted" id="event-count"></span></summary>
+        <ol id="events"></ol>
+      </details>
+    </section>
+  </main>
+
+  <dialog id="code-dialog" class="wide-dialog" aria-labelledby="code-title">
+    <div class="dialog-head">
+      <h2 id="code-title">Protocol code</h2>
+      <div class="head-actions">
+        <button type="button" class="btn ghost small" id="copy-code">Copy</button>
+        <a class="btn ghost small" id="download-code" download>Download .py</a>
+        <button type="button" class="btn ghost small" data-close>Close</button>
+      </div>
+    </div>
+    <pre class="code" id="code-view"></pre>
+  </dialog>
+
+  <dialog id="steps-dialog" class="wide-dialog" aria-labelledby="steps-title">
+    <div class="dialog-head">
+      <h2 id="steps-title">Simulated run</h2>
+      <button type="button" class="btn ghost small" data-close>Close</button>
+    </div>
+    <div id="steps-view"></div>
+  </dialog>
+
+  <dialog id="plan-dialog" class="wide-dialog" aria-labelledby="plan-title">
+    <div class="dialog-head">
+      <h2 id="plan-title">Review the run</h2>
+      <button type="button" class="btn ghost small" data-close>Close</button>
+    </div>
+    <p class="muted small" id="plan-intro"></p>
+    <ul class="notice-list" id="plan-warnings"></ul>
+    <ol class="steps plan-steps" id="plan-steps"></ol>
+    <p class="form-error" id="plan-error" role="alert" hidden></p>
+    <div class="send-actions">
+      <button type="button" class="btn ghost" data-close>Back to the design</button>
+      <button type="button" class="btn primary" id="approve-btn">Approve and send to lab</button>
+    </div>
+  </dialog>
+
+  <div class="tooltip" id="tooltip" role="tooltip" hidden></div>
+</body>
+</html>

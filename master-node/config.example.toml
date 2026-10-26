@@ -1,0 +1,18 @@
+# Copy to config.toml (or point $MASTER_NODE_CONFIG at your file).
+# Every key is optional; the defaults are shown. The instruments themselves are
+# in the instrument registry (instruments.toml; see instruments.example.toml).
+
+[server]
+host = "0.0.0.0"
+port = 8000
+# If set, the protocol tool must send this as the X-API-Key header.
+api_key = ""
+# Where the protocol tool is served from.
+cors_origins = ["http://localhost:5500", "http://127.0.0.1:5500"]
+database = "master_node.db"
+# The instrument registry.
+instruments = "instruments.toml"
+
+[sim]
+# Multiplier on simulated delays: 1.0 is roughly real time, 0.1 is 10x faster.
+time_scale = 1.0

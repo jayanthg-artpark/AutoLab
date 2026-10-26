@@ -1,0 +1,100 @@
+# Instrument registry: every instrument the master node can use.
+# Copy to instruments.toml (or set [server] instruments in config.toml to another file).
+#
+# For each instrument:
+#   id            short name used in runs and logs ("storage" is reserved)
+#   kind          transport | liquid_handler | plate_reader | plate_washer | qpcr
+#   driver        sim             simulated
+#                 manual          (transport) a person moves the plate and clicks "Plate moved"
+#                 job_api         a server following the lab job API (INSTRUMENT_API.md)
+#                 opentrons_flex  an Opentrons Flex, through its own HTTP API (port 31950)
+#                 tecan_infinite  the Tecan Infinite M200 Pro reader API on the Tecan PC
+#   url           the server's address (not needed for sim and manual)
+#   api_key       sent as X-API-Key; the server should refuse requests without it
+#   name          shown in the protocol tool
+#   timeout_s     longest one operation may take
+#   plate_slots   where the transport can put the plate on this instrument
+#   default_slot  where it does unless a step names another (default: the first)
+#   options       driver settings (see below)
+#   limits        safety limits; runs outside them are refused before anything moves
+#
+# Limits the planner checks:
+#   any instrument   labware = ["corning_96_wellplate_360ul_flat", ...]   plates it accepts
+#   plate_reader     modes = ["absorbance", ...], wavelength_nm = [min, max], max_wavelengths,
+#                    excitation_nm = [min, max], emission_nm = [min, max], integration_ms = [min, max],
+#                    methods = [...] saved methods allowed
+#   liquid_handler   max_protocol_kb
+#   plate_washer     programs = [...], programs_only = true, max_volume_ul, max_cycles
+#   qpcr             programs = [...]
+#
+# Only the master node should be able to reach these servers; see README
+# "Only the master node controls the instruments".
+
+[[instrument]]
+id = "thor"
+kind = "transport"
+name = "Jetson Thor"
+driver = "manual"             # until Thor's server leaves dry_run; then job_api with the url below
+# The Thor lab server (thor-server/, on the Jetson in ~/lab_thor_server). Its key is
+# server.api_key in that folder's config.yaml.
+# url = "http://192.168.0.225:8030"
+# api_key = "<server.api_key from ~/lab_thor_server/config.yaml>"
+timeout_s = 3600.0            # manual: how long to wait for a person to move the plate
+clear_timeout_s = 30.0        # how long to wait for Thor to report home after a move
+
+[[instrument]]
+id = "flex"
+kind = "liquid_handler"
+name = "Opentrons Flex"
+driver = "opentrons_flex"
+# The Flex API has no keys: connect the Flex directly to the master node PC
+# (Ethernet cable or USB) so no other computer can reach it.
+url = "http://172.25.68.5:31950"
+# Thor can't reach A1/A2; A3 is the trash bin and D3 the waste chute.
+plate_slots = ["B1", "B2", "B3", "C1", "C2", "C3", "D1", "D2"]
+default_slot = "D2"
+timeout_s = 14400.0
+options = { opentrons_version = "*" }
+
+[[instrument]]
+id = "tecan"
+kind = "plate_reader"
+name = "Tecan Infinite M200 Pro"
+driver = "tecan_infinite"
+url = "http://192.168.0.116:8000"
+plate_slots = ["carrier"]
+timeout_s = 1800.0
+[instrument.limits]
+modes = ["absorbance", "fluorescence", "luminescence"]
+wavelength_nm = [230, 1000]
+max_wavelengths = 10
+excitation_nm = [230, 850]
+emission_nm = [280, 850]
+integration_ms = [1, 10000]
+
+# Add these once their servers run on the instrument PC (job_api), or set
+# driver = "sim" to try workflows with them before then.
+
+# [[instrument]]
+# id = "washer"
+# kind = "plate_washer"
+# name = "Plate washer"
+# driver = "job_api"
+# url = "http://192.168.0.116:8010"
+# api_key = ""
+# options = { access = false }   # true if the master node must open a drawer/lid around moves
+# [instrument.limits]
+# programs = ["ELISA-3x300"]
+# max_volume_ul = 400
+# max_cycles = 10
+
+# [[instrument]]
+# id = "qpcr"
+# kind = "qpcr"
+# name = "qPCR"
+# driver = "job_api"
+# url = "http://192.168.0.116:8020"
+# api_key = ""
+# timeout_s = 10800.0
+# [instrument.limits]
+# programs = ["SYBR-40"]

@@ -1,0 +1,79 @@
+# Copy to config.toml (or point $PROTOCOL_TOOL_CONFIG at your file).
+# Every key is optional; the defaults are shown.
+# API keys are NOT set here: put them in protocol-tool\.env (NAME=value lines),
+# e.g. GEMINI_API_KEY=... or ANTHROPIC_API_KEY=..., or set them as environment variables.
+
+[server]
+host = "127.0.0.1"        # use "0.0.0.0" to serve other machines on the network
+port = 5500
+database = "protocol_tool.db"
+
+[assistant]
+# Which AI model designs the protocols:
+#   "gemini" - Google's free tier (key: GEMINI_API_KEY, free from aistudio.google.com/apikey)
+#   "ollama" - free model on this PC via Ollama (no key; needs Ollama installed and running)
+#   "claude" - Claude (key: ANTHROPIC_API_KEY, paid, from console.anthropic.com)
+#   "openai" - any other OpenAI-compatible server (set url, model and api_key_env)
+provider = "claude"
+model = ""                # empty = the provider's default:
+                          #   claude-opus-5-5 / gemini-flash-latest / qwen3:30b
+url = ""                  # empty = the provider's default
+api_key_env = ""          # empty = the provider's default (see above)
+# fallback_models = ["gemini-3.5-flash", "gemini-flash-lite-latest"]
+#                         # tried in order when the model is overloaded, out of quota or retired
+#                         # (default for gemini as shown; [] turns fallbacks off)
+effort = "high"           # Claude only: low | medium | high | xhigh | max
+max_tool_rounds = 16      # most tool calls (look up, write/simulate/fix, workflow, analysis) per reply
+max_upload_mb = 20
+
+[master]
+url = "http://localhost:8000"
+api_key = ""              # must match the master node's server.api_key
+timeout_s = 15.0
+
+[simulator]
+python = ""               # Python with the opentrons package; empty = this server's Python
+timeout_s = 120.0
+
+[lab]
+# Slots where Thor can place the sample plate; the assistant picks one per protocol.
+# Thor can't reach A1/A2. Keep in step with the Flex's plate_slots in the master
+# node's instruments.toml.
+thor_slots = ["B1", "B2", "B3", "C1", "C2", "C3", "D1", "D2"]
+blocked_slots = ["A1", "A2"]  # kept empty: no labware, tip racks, modules, fixtures or moves there
+trash_slot = "A3"         # fixed trash bin
+waste_chute_slot = "D3"   # fixed waste chute; "" if the deck has none
+# Python Protocol API level every protocol must use. "latest" = the newest the installed
+# opentrons package supports (2.31 with opentrons 10.0.0). The Flex's robot software must
+# support it too: update the Flex, or set the level its software supports, e.g. "2.27".
+api_level = "latest"
+# Labware protocols may load (load names, * wildcards). Anything else fails the simulation
+# check; OT-2 tip racks always fail. [] = any labware except OT-2 tip racks.
+labware = [
+  "opentrons_flex_*",   # Flex tip racks, filter tip racks and adapters
+  "corning_96_wellplate_360ul_flat",
+  "nest_96_wellplate_200ul_flat",
+  "nest_12_reservoir_15ml",
+  "nest_1_reservoir_195ml",
+  "opentrons_24_tuberack_eppendorf_1.5ml_safelock_snapcap",
+  "opentrons_15_tuberack_falcon_15ml_conical",
+]
+# What the assistant may use on the Flex. Edit to match your lab exactly: it only
+# designs with what is listed here.
+inventory = """
+- Pipettes: Flex 1-Channel 1000 uL (flex_1channel_1000) on the left mount, Flex 8-Channel 1000 uL (flex_8channel_1000) on the right mount
+- Gripper: installed
+- Modules: none
+- Tip racks: opentrons_flex_96_tiprack_50ul, opentrons_flex_96_tiprack_200ul, opentrons_flex_96_tiprack_1000ul (and the filtertiprack versions)
+- Labware in stock: corning_96_wellplate_360ul_flat, nest_96_wellplate_200ul_flat, nest_12_reservoir_15ml, nest_1_reservoir_195ml, opentrons_24_tuberack_eppendorf_1.5ml_safelock_snapcap, opentrons_15_tuberack_falcon_15ml_conical
+- Fixtures: a trash bin in slot A3 and a waste chute in slot D3
+"""
+
+[knowledge]
+# Folder the assistant searches: manuals\ (kit manuals, IFUs) and templates\ (assay templates).
+folder = "knowledge"
+
+[results]
+# "Explain" on the Runs tab: the AI model summarises a finished run's results, or suggests
+# what to check when it failed. false = no run data is sent to the model.
+explain = true

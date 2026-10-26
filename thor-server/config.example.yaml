@@ -1,0 +1,116 @@
+# Thor lab server settings. Restart the server after editing (./thorctl.sh restart).
+
+server:
+  host: 0.0.0.0
+  port: 8030
+  # The master node sends this as X-API-Key; it must match api_key under the thor entry in
+  # master-node/instruments.toml. Requests without it are refused.
+  api_key: ""              # set a long random string; see "Run it" in README.md
+
+# dry_run   arm flows run with --dry-run (commands printed, NOTHING moves), driving is skipped
+# nav_only  the base really drives to each station; the arm is NOT used (the plate move is
+#           assumed) - for end-to-end tests of the lab before the arm is ready
+# arm_only  the arm really picks and places; the base does not drive (park it at the station by hand)
+# full      the base drives between stations and the arm picks and places
+mode: nav_only
+
+# The existing pick-and-place stack this server drives.
+perception_stack: ~/perception_stack
+ros_setup: /opt/ros/jazzy/setup.bash
+workspace_setup: ~/perception_stack/franka_ros2/install/setup.bash
+
+# Driving: the nav team's saved locations and their "go to" tool (ranger_mini, Nav2).
+#   ros2 run ranger_obstacle_avoidance locations list | save <name> | go <name>
+nav:
+  setup: ~/jayanth/ranger_mini/install/setup.bash
+  env_script: ~/jayanth/ranger_mini/scripts/dds_env.sh   # their DDS settings, as their scripts use
+  locations_file: ~/jayanth/ranger_mini/maps/locations.yaml
+  go_command: ros2 run ranger_obstacle_avoidance locations go
+  timeout_s: 600          # longest one drive may take; then the goal is cancelled
+
+# What transfers carry: the arm stack's object name and its RT-DETR class id
+# (franka_ros2/config/objects/well_plate.yaml; class 1 in fresh_v9_model_best.plan).
+plate:
+  object: well_plate
+  class_id: 1
+
+# Longest an arm flow may take before the server stops it.
+arm_timeout_s: 1800
+
+# Where the robot waits between jobs.
+home_station: home
+
+# Stations, by the names the master node uses (its instrument ids, plus "storage").
+#   location  the saved place (in locations_file) the base drives to for this station
+#   slots     master node slot name -> the arm frame it is in franka_ros2/config/static_tfs.yaml.
+#             Only used when the arm moves (arm_only, full): a transfer to/from a slot not listed
+#             here is then refused.
+stations:
+  home:
+    location: home
+    slots: {}
+
+  flex:
+    location: opentrons
+    # ASSUMPTION TO CONFIRM with the arm team: that static_tfs.yaml's b1..d2_slot frames are
+    # these Flex deck slots. The Flex's B3, C3 are not calibrated for the arm yet.
+    slots:
+      B1: b1_slot
+      B2: b2_slot
+      C1: c1_slot
+      C2: c2_slot
+      D1: d1_slot
+      D2: d2_slot
+
+  tecan:
+    location: tecan_spectro
+    slots:
+      carrier: tecan_tray
+
+  storage:
+    # No storage place saved yet: plates are taken to/from the home position for now.
+    # Save one ("locations save plate_storage") and put its name here when there is one.
+    location: home
+    slots: {}         # no storage positions calibrated for the arm yet
+
+# The arm flows each transfer runs, in the arm stack's own flow format (see
+# perception_stack/README.md "Running a task"). "$object", "$class_id" and "$frame" (the slot's arm
+# frame) are filled in per job; ${PERCEPTION_STACK_ROOT} is expanded by the arm stack itself.
+# Every flow is generated into jobs/<job id>/ so you can inspect or dry-run it by hand:
+#   python3 ~/perception_stack/system/run_task.py jobs/<id>/pick.yaml --dry-run
+flows:
+  # Find the plate with the camera and grasp it, retrying the pick (not just the check) up to 3
+  # times from the home pose. vs_pick locates the plate visually, so the camera must be able to
+  # see it from the home pose; add a move_to_tf to a viewing frame first if it can't.
+  pick:
+    - skill: move_home
+      args: {execute: true}
+      retry: 1
+      retry_delay: 2.0
+    - skill: verify_detections
+      args: {class_ids: [$class_id], names: [$object]}
+      retry: 3
+      retry_delay: 5.0
+    - group: pick_verified
+      retry: 3
+      retry_delay: 3.0
+      recovery:
+        - skill: move_home
+          args: {execute: true}
+      steps:
+        - skill: vs_pick
+          args: {object: $object}
+        - skill: check_grasp_width
+          args: {}
+    - skill: move_home
+      args: {execute: true}
+
+  # Seat the plate in the destination frame (compliant spiral search), then back to home.
+  place:
+    - skill: place_seat
+      args:
+        target_frame: $frame
+        object: $object
+        demo_data: ${PERCEPTION_STACK_ROOT}/assets/objects
+    - skill: move_home
+      args: {execute: true}
