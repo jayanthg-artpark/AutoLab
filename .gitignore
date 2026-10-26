@@ -21,3 +21,6 @@ protocol-tool/knowledge/sources.json
 # Hold the Thor API key; commit instruments.example.toml / config.example.yaml instead.
 master-node/instruments.toml
 thor-server/config.yaml
+master-node/config.manual.toml
+master-node/instruments.manual.toml
+protocol-tool/config.manual.toml
