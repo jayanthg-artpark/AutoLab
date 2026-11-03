@@ -39,7 +39,9 @@ It holds the scientist UI and the planner services:
 **Runs tab.** Each run's progress step by step, with the plate heatmap and CSV
 download when it finishes, and **Explain**: the AI model's plain-language
 summary of the results, or what to check when a run failed (turn off with
-`[results] explain = false`).
+`[results] explain = false`). Under **How did it go?** the scientist rates
+the run (worked, partly worked, failed) and notes what to change next time; see
+[The experiment notebook](#the-experiment-notebook-learning-from-past-runs).
 
 ## Results: curves and calculated values
 
@@ -63,6 +65,40 @@ below 0.98 is flagged. **Explain** summarises these computed numbers; the AI
 model never calculates them. With simulated instruments the readings are a
 fixed pattern, so curves won't fit; real readings will.
 
+## The experiment notebook: learning from past runs
+
+The assistant gets better with every run the lab does, without retraining any
+model: each finished run becomes a record it searches when anyone designs a
+similar experiment.
+
+- **A record for every finished run.** Within a minute of a run finishing,
+  the protocol tool writes `knowledge\experiments\<run id>.md`. The record has
+  what the experiment needed, the workflow and protocol code exactly as sent,
+  how the run went (errors, failed steps), the computed results (fits, R²,
+  sample values, flags) and the **Explain** summary, if there is one.
+- **The scientist's rating.** On the Runs tab, **How did it go?** asks whether
+  the run worked, partly worked or failed, and what to change next time (for
+  example "the top standard was saturated; start at 1000 µg/mL"). **Save to
+  notebook** rewrites the record with them. Anyone can change a rating later.
+- **How the assistant uses it.** Before designing, it searches past
+  experiments for the assay, kit and technique. It starts from designs rated
+  *worked* and applies their notes. It reuses *partly worked* ones only with
+  the noted changes. It never copies *failed* ones; it tells the scientist
+  why a similar run failed and avoids the same mistake. It lists the records
+  it used under **Based on**, next to the kit manuals.
+- **Ranking.** Search ranks records rated *worked* highest, then *partly
+  worked*, then *failed*. Runs nobody has rated rank lowest, so one unreviewed
+  run doesn't steer everyone's designs.
+
+Records are plain Markdown: open one to check it, and delete one that
+shouldn't be learned from (it isn't written again unless someone rates the
+run). The folder is in `.gitignore`. Turn the notebook off with
+`[knowledge] record_experiments = false`.
+
+Every user's past experiments are visible to everyone using the tool, and they
+go into the prompts the AI model receives. On Gemini's free tier, Google may use
+what you send, so use Ollama or a paid key for confidential work.
+
 ## Knowledge: kit manuals, templates and other labs' protocols
 
 The assistant searches the `knowledge` folder by keyword while it designs:
@@ -73,6 +109,7 @@ The assistant searches the `knowledge` folder by keyword while it designs:
 | `templates\` | Assay templates (`.md`, `.txt`) | Write them; two generic examples are included |
 | `protocols\` | Example protocols from other labs | Imported (below) |
 | `reference\` | The Opentrons Python API docs and official Flex examples | Imported (below) |
+| `experiments\` | The lab's own finished runs, one record each | Written automatically (below) |
 
 New files are searchable at once, with no restart. The assistant follows a kit manual's
 volumes, times and wavelengths, adapts example protocols (most Opentrons Library
@@ -109,12 +146,18 @@ http://localhost:5500 in your browser. The first time, it sets up its Python
 packages, including the Opentrons simulator, which takes a few minutes. Keep
 the window open; closing it stops the site.
 
+It needs **Python 3.12** (from python.org; it can sit next to other versions).
+The newest Opentrons simulator fails on 3.11, and the numpy version it uses has
+no build for 3.13. Every start upgrades the simulator to the newest Opentrons
+release first. Without internet it says so and starts with the installed version.
+
 Or from PowerShell:
 
 ```powershell
-cd D:\testing\protocol-tool
-python -m venv .venv                                  # setup, once
+cd D:\AutoLab\protocol-tool
+py -3.12 -m venv .venv                                # setup, once
 .\.venv\Scripts\python -m pip install -e ".[dev]"     # setup, once
+.\.venv\Scripts\python -m pip install --upgrade opentrons   # the newest simulator
 .\.venv\Scripts\python -m protocol_tool               # http://localhost:5500
 ```
 
@@ -145,15 +188,15 @@ after adding a key just click **Check again** on the page; no restart needed.
 For example, to add the Gemini key from PowerShell:
 
 ```powershell
-Set-Content D:\testing\protocol-tool\.env "GEMINI_API_KEY=<your key>"
+Set-Content D:\AutoLab\protocol-tool\.env "GEMINI_API_KEY=<your key>"
 ```
 
 Things to know about the free options:
 
 - **Gemini's free tier:** Google may use what you send to improve its
   products (check their current terms). Don't send confidential protocols or
-  data on the free tier. The free tier is rate-limited; the tool waits and
-  retries when it hits the limit.
+  data on the free tier. The free tier is rate-limited; see
+  [When the free quota runs out](#when-the-free-quota-runs-out).
 - **Ollama** keeps everything on this PC. A model like `qwen3:30b` fits in the
   24 GB GPU here. Local models make more mistakes than Claude or Gemini, so
   expect more simulate-and-fix rounds.
@@ -164,6 +207,33 @@ Things to know about the free options:
   wrote it, and every workflow through the master node's checks. Review stays
   locked until they pass.
 
+### When the free quota runs out
+
+Gemini's free tier limits requests per minute and per day, separately for
+each model and for each Google project (one key's project is shared by
+everyone using the tool). Daily limits reset at midnight Pacific time. Your
+project's limits and use are at https://aistudio.google.com/rate-limit.
+
+When a limit is hit, the tool:
+
+1. **Moves to the next Gemini model** (`fallback_models`: `gemini-3.5-flash`,
+   then `gemini-flash-lite-latest`), each with its own quota. A model that is
+   out of quota isn't tried again until its quota is back: a minute or so for
+   a per-minute limit (as long as Gemini says), midnight Pacific time for a
+   daily one. Requests then go back to it.
+2. **Waits out a short per-minute limit** on the last Gemini model, up to a
+   minute, with "waiting … s" in the chat.
+3. **Says when it can go on** once every Gemini model is out: in about a
+   minute for per-minute limits, or after midnight Pacific time for daily ones.
+
+**Another provider can take over** when every Gemini model is out. It's off by
+default. Set `[assistant] fallback_providers` in `config.toml` to `["ollama"]`
+(free, on this PC; install it as in the table above), `["claude"]` (paid;
+needs `ANTHROPIC_API_KEY`), or both in order. The chat shows a notice when it
+switches, and another when Gemini takes over again. The conversation carries on
+with everything designed so far. If the fallback can't answer either, the reply
+says why both stopped.
+
 ## Configure
 
 Copy `config.example.toml` to `config.toml`. The settings that matter most:
@@ -173,13 +243,16 @@ Copy `config.example.toml` to `config.toml`. The settings that matter most:
   accurate.
 - **Flex only, newest API.** Every protocol must be a Flex protocol at
   `[lab] api_level` (default `"latest"`: the newest level the installed
-  `opentrons` package supports, 2.31 now) and may load only the labware in
+  `opentrons` package supports) and may load only the labware in
   `[lab] labware` (the lab's Flex labware; `*` wildcards allowed). OT-2 tip racks
   always fail, and the simulator itself refuses OT-2 pipettes and modules. A
   protocol that breaks these rules fails its simulation, so it can't be sent,
   and designs checked under older rules are checked again when you review them.
-  The Flex's robot software must support the same API level; if it is older,
-  update the Flex or set `api_level` to what it supports.
+  **The lab always runs the newest Opentrons software.**
+  `run-protocol-tool.cmd` upgrades the `opentrons` package (the simulator)
+  every time it starts, so protocols use the newest API level. Keep the Flex
+  updated too (Opentrons App, the Flex, Robot Settings, update). A Flex that
+  falls behind rejects protocols at a newer API level when a run starts.
 - **`[lab] thor_slots`, `blocked_slots`, `trash_slot`, `waste_chute_slot`**: the
   deck rules. Thor can place the sample plate in B1–B3, C1–C3, D1 and D2.
   **A1 and A2 stay empty** (`blocked_slots`): no labware, tip racks, reservoirs,
@@ -221,7 +294,8 @@ node's API key stay on the server.
 | `protocol_tool/assistant.py` | Chat loop, the tools (`record_requirements`, `search_knowledge`, `read_knowledge`, `write_protocol`, `set_workflow`, `set_reader_settings`), system prompt, run summaries, Claude client |
 | `protocol_tool/analysis.py` | Result analysis: curve fits (linear, quadratic, log-linear, 4PL, 5PL), interpolation, comparisons, CSV |
 | `protocol_tool/workflow.py` | Design â†’ run submission (the IR the master node accepts), and the hash an approval is tied to |
-| `protocol_tool/knowledge.py` | Keyword search over the `knowledge` folder |
+| `protocol_tool/knowledge.py` | Keyword search over the `knowledge` folder; experiment records ranked by rating |
+| `protocol_tool/experiments.py` | The experiment notebook: one Markdown record per finished run |
 | `protocol_tool/knowledge_import.py` | Imports from the Opentrons Protocol Library and docs, GitHub, protocols.io and URLs |
 | `protocol_tool/openai_compat.py` | Gemini, Ollama and other OpenAI-compatible models |
 | `protocol_tool/model_status.py` | Checks that the configured model and key work; `.env` loading |

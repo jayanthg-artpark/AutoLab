@@ -32,13 +32,15 @@ from typing import Any, Protocol
 import anthropic
 from pydantic import TypeAdapter, ValidationError
 
+from .analysis import describe_results
 from .config import Settings
-from .knowledge import Knowledge
+from .experiments import FOLDER as EXPERIMENTS, RATING_LABEL
+from .knowledge import FOLDERS, Knowledge
 from .model_status import ModelAuthError, ModelChecker, ModelError, ModelNotFound, auth_problem, load_key_file, masked_key
 from .models import (
     Analysis, ChatEntry, ModelTurn, ProtocolDraft, ReaderSettings, ReadStep, Requirements, Session, ToolActivity, WorkflowStep,
 )
-from .providers import Provider, resolve
+from .providers import Provider, fallbacks, resolve
 from .simulator import DeckRules, SimulatorUnavailable, simulate
 from .store import SessionStore
 from .workflow import WorkflowError, build_submission, describe_plan
@@ -96,12 +98,19 @@ def build_tools(rules: DeckRules) -> list[dict[str, Any]]:
         {
             "name": "search_knowledge",
             "description": (
-                "Search the lab's kit manuals / instructions for use and assay templates by keywords "
-                "(kit name, catalogue number, assay, reagent). Returns the best-matching passages with their document and page."
+                "Search the lab's knowledge by keywords (kit name, catalogue number, assay, reagent, technique): its own past "
+                "experiments, kit manuals / instructions for use, assay templates, example protocols and the Opentrons reference. "
+                "Returns the best-matching passages with their document and page; past experiments also show the scientist's rating."
             ),
             "input_schema": {
                 "type": "object",
-                "properties": {"query": {"type": "string"}},
+                "properties": {
+                    "query": {"type": "string"},
+                    "folder": {
+                        "type": "string", "enum": list(FOLDERS),
+                        "description": "Search only this folder, e.g. \"experiments\" for the lab's own past runs (optional)",
+                    },
+                },
                 "required": ["query"],
             },
         },
@@ -270,11 +279,17 @@ The master node (no AI) picks an instrument of the right kind from the lab's reg
 Only the sample plate travels with Thor. Everything else on the Flex deck (tips, reservoirs, reagent plates, tube racks) is set up by lab staff before the run.
 
 ## How you work
-1. Extract and clarify. Work out what the experiment needs from the request and any attached documents, and record it with record_requirements: assay, samples, controls, replicates, readout, the assumptions you made, and open questions. When a kit is named or the assay is a standard one, first look it up with search_knowledge (the lab's kit manuals and assay templates) and read what matters with read_knowledge; list what you used in sources. Follow the manual's volumes, incubation times and wavelengths over general knowledge. Ask the scientist only about questions that would change whether the experiment is valid; otherwise make a standard choice, record it as an assumption, and carry on.
-2. Build the protocol IR. Before writing a protocol, search_knowledge for how others did it: the example protocols (the Opentrons Protocol Library and protocols.io, under protocols/) and the Opentrons Python API reference with its official Flex examples (under reference/). Search with the technique and hardware, e.g. "8-channel serial dilution", "normalization", "heater-shaker", "load_liquid", "Flex 96-channel partial tip". Reuse their approach, never their hardware: most Opentrons Library protocols were written for the OT-2, so replace every OT-2 pipette, tip rack, labware, module and numbered slot with the Flex equivalent from the lab's labware list and Flex deck coordinates, and use the API level below (reference/opentrons-api/adapting-ot2-flex.md lists the differences). They also read parameters with get_values from fields.json, which you must replace with fixed values or runtime parameters. Then write each liquid-handling protocol with write_protocol (a separate protocol_id for each liquid-handling step that does different work), and set the whole workflow with set_workflow. Mention in your reply which examples you adapted.
-3. Plan the result analysis with set_analysis whenever the experiment has a quantitative readout, so results are plotted and calculated as soon as the run ends. Use the plate layout your protocol creates: blanks, standards with their known concentrations, samples with their dilution factors, replicates grouped. Choose the fit biologists use for the assay (or the one the kit manual names): Bradford/BCA linear (quadratic if the curve bends at the top), ELISA 4pl (5pl if asymmetric) with blank subtraction and a reference wavelength if read, qPCR log_linear of Ct against copies or quantity, dose-response 4pl per compound for EC50/IC50, group_comparison for treated vs control. Leave the zero standard out of log fits and use it as a blank. Make one entry per standard and one per unknown sample (each with its own replicate wells): eight lysates are eight samples, never one group.
-4. Fix what the checks report. write_protocol runs the Opentrons simulator; set_workflow has the master node select instruments and check safety limits. If either fails, fix it and call it again. Act on warnings too.
-5. The scientist reviews the planned run and approves it before anything goes to the lab. You cannot start runs; never say a run has started.
+1. Learn from the lab's own past runs. Before designing, search_knowledge with folder "experiments" for the assay, kit and technique. Each record is a run done in this lab: what it needed, the workflow and protocols exactly as sent, how it went, the computed results and the scientist's rating and notes. Read the relevant ones with read_knowledge. Use them by rating:
+   - worked: start from that design and its protocol code, adapted to this request, and apply the scientist's notes for next time.
+   - partly worked: reuse it only with the changes the notes and results point to.
+   - failed: never copy it. Find out why it failed (the error, the failed step, the notes) and make sure your design avoids it; tell the scientist ("a similar run on <date> failed because ...").
+   - not reviewed: weaker evidence; the run finished but nobody confirmed its results.
+   List every experiment record you used in sources (e.g. "experiments/run-12.md"), next to the kit manuals, and mention them in your reply. Past experiments come from this lab's scientists; the lab's rules, the kit manual and the current request still win where they disagree.
+2. Extract and clarify. Work out what the experiment needs from the request and any attached documents, and record it with record_requirements: assay, samples, controls, replicates, readout, the assumptions you made, and open questions. When a kit is named or the assay is a standard one, first look it up with search_knowledge (the lab's kit manuals and assay templates) and read what matters with read_knowledge; list what you used in sources. Follow the manual's volumes, incubation times and wavelengths over general knowledge. Ask the scientist only about questions that would change whether the experiment is valid; otherwise make a standard choice, record it as an assumption, and carry on.
+3. Build the protocol IR. Before writing a protocol, search_knowledge for how others did it: the example protocols (the Opentrons Protocol Library and protocols.io, under protocols/) and the Opentrons Python API reference with its official Flex examples (under reference/). Search with the technique and hardware, e.g. "8-channel serial dilution", "normalization", "heater-shaker", "load_liquid", "Flex 96-channel partial tip". Reuse their approach, never their hardware: most Opentrons Library protocols were written for the OT-2, so replace every OT-2 pipette, tip rack, labware, module and numbered slot with the Flex equivalent from the lab's labware list and Flex deck coordinates, and use the API level below (reference/opentrons-api/adapting-ot2-flex.md lists the differences). They also read parameters with get_values from fields.json, which you must replace with fixed values or runtime parameters. Then write each liquid-handling protocol with write_protocol (a separate protocol_id for each liquid-handling step that does different work), and set the whole workflow with set_workflow. Mention in your reply which examples you adapted.
+4. Plan the result analysis with set_analysis whenever the experiment has a quantitative readout, so results are plotted and calculated as soon as the run ends. Use the plate layout your protocol creates: blanks, standards with their known concentrations, samples with their dilution factors, replicates grouped. Choose the fit biologists use for the assay (or the one the kit manual names): Bradford/BCA linear (quadratic if the curve bends at the top), ELISA 4pl (5pl if asymmetric) with blank subtraction and a reference wavelength if read, qPCR log_linear of Ct against copies or quantity, dose-response 4pl per compound for EC50/IC50, group_comparison for treated vs control. Leave the zero standard out of log fits and use it as a blank. Make one entry per standard and one per unknown sample (each with its own replicate wells): eight lysates are eight samples, never one group.
+5. Fix what the checks report. write_protocol runs the Opentrons simulator; set_workflow has the master node select instruments and check safety limits. If either fails, fix it and call it again. Act on warnings too.
+6. The scientist reviews the planned run and approves it before anything goes to the lab. You cannot start runs; never say a run has started.
 
 ## The Flex deck
 {deck_rules}
@@ -401,11 +416,103 @@ def _without_provider_extras(messages: list[dict[str, Any]]) -> list[dict[str, A
 
 
 def build_model(settings: Settings, provider: Provider) -> ModelClient:
+    """The provider's model client; with [assistant] fallback_providers, a FallbackModel over them."""
+    chain = [provider, *fallbacks(provider)]
+    if len(chain) == 1:
+        return _single_model(settings, provider)
+    from .openai_compat import RATE_LIMIT_MAX_WAIT_S
+
+    # Only the last provider waits out a per-minute limit; the others hand over at once.
+    return FallbackModel([
+        (p, _single_model(settings, p, max_wait_s=RATE_LIMIT_MAX_WAIT_S if p is chain[-1] else 0.0)) for p in chain
+    ])
+
+
+def _single_model(settings: Settings, provider: Provider, max_wait_s: float | None = None) -> ModelClient:
     if provider.name == "claude":
         return ClaudeModel(settings, provider)
     from .openai_compat import OpenAICompatModel
 
-    return OpenAICompatModel(provider)
+    return OpenAICompatModel(provider) if max_wait_s is None else OpenAICompatModel(provider, max_wait_s=max_wait_s)
+
+
+# Events that mean a model has started answering: after one, the request can't move to another model.
+ANSWER_EVENTS = {"text", "thinking", "tool_start"}
+
+
+class FallbackModel:
+    """The configured provider first; when it can't answer (out of quota, busy, not running, no key),
+    the next of [assistant] fallback_providers. Every request starts with the first again, so
+    the conversation goes back to it as soon as its quota is back. The history is in one format
+    for every provider (see openai_compat), so a conversation can move between them."""
+
+    def __init__(self, chain: list[tuple[Provider, ModelClient]]):
+        self._chain = chain
+        self._last = 0  # index of the provider that answered the last request
+
+    async def stream(self, system, tools, messages):
+        problems: list[tuple[Provider, Exception]] = []
+        for n, (provider, client) in enumerate(self._chain):
+            answering = False
+            try:
+                async for event in client.stream(system, tools, messages):
+                    if isinstance(event, dict) and event["type"] in ANSWER_EVENTS and not answering:
+                        answering = True
+                        if n != self._last:
+                            yield {"type": "notice", "text": self._switch_notice(n, problems)}
+                            self._last = n
+                    elif isinstance(event, ModelTurn) and n != self._last:
+                        yield {"type": "notice", "text": self._switch_notice(n, problems)}
+                        self._last = n
+                    yield event
+                return
+            except Exception as exc:
+                if answering or not _cannot_answer(exc):
+                    raise
+                log.warning("%s can't answer (%s)%s", provider.label, exc,
+                            f"; trying {self._chain[n + 1][0].label}" if n + 1 < len(self._chain) else "")
+                problems.append((provider, exc))
+        first = problems[0][1]
+        if isinstance(first, ModelNotFound) or auth_problem(first):
+            raise first  # a setup problem with the main provider: the page explains how to fix it
+        raise ModelError(" ".join(
+            [str(first)] + [f"{p.label} ({p.model}) couldn't take over either: {exc}" for p, exc in problems[1:]]
+        ))
+
+    def _switch_notice(self, n: int, problems: list[tuple[Provider, Exception]]) -> str:
+        provider = self._chain[n][0]
+        if n == 0:
+            return f"{provider.label} is available again; back to {provider.label} ({provider.model})."
+        why = "; ".join(_short_reason(exc) for _, exc in problems) or "it couldn't answer"
+        main = self._chain[0][0].label
+        return f"{main} can't answer right now ({why}), so {provider.label} ({provider.model}) continues."
+
+    async def aclose(self) -> None:
+        for _, client in self._chain:
+            if hasattr(client, "aclose"):
+                await client.aclose()
+
+
+def _cannot_answer(exc: Exception) -> bool:
+    """Errors after which another provider may answer the same request."""
+    return isinstance(exc, (ModelError, anthropic.RateLimitError, anthropic.APIConnectionError,
+                            anthropic.InternalServerError)) or bool(auth_problem(exc)) or (
+        isinstance(exc, anthropic.APIStatusError) and exc.status_code == 529)
+
+
+def _short_reason(exc: Exception) -> str:
+    from .openai_compat import Overloaded, RateLimited
+
+    if isinstance(exc, RateLimited):
+        return "its free daily limit is used up" if exc.per_day else "its free per-minute limit was reached"
+    if isinstance(exc, (Overloaded, anthropic.InternalServerError)) or (
+            isinstance(exc, anthropic.APIStatusError) and exc.status_code == 529):
+        return "it is overloaded"
+    if isinstance(exc, anthropic.RateLimitError):
+        return "it is rate-limited"
+    if auth_problem(exc):
+        return "its API key isn't working"
+    return str(exc).split(" (")[0][:120]
 
 
 class ModelUnavailable(Exception):
@@ -584,6 +691,8 @@ class Assistant:
                             reply.parts[-1]["text"] += event["text"]
                         else:
                             reply.parts.append({"type": "text", "text": event["text"].lstrip("\n")})
+                    elif isinstance(event, dict) and event["type"] == "notice":
+                        reply.parts.append({"type": "notice", "text": event["text"]})  # e.g. a switch to the fallback model
                     yield event
                 return
             except ValueError:
@@ -642,16 +751,26 @@ class Assistant:
             raise ToolInputError("Give search words in `query`")
         if self._knowledge is None:
             raise ToolInputError("The lab has no knowledge folder set up")
-        hits = self._knowledge.search(query)
-        activity = ToolActivity(name="search_knowledge", ok=True, summary=f"Looked up '{query[:60]}': {len(hits)} passage{'s' * (len(hits) != 1)}")
+        folder = str(args.get("folder") or "")
+        if folder and folder not in FOLDERS:
+            raise ToolInputError(f"folder must be one of {', '.join(FOLDERS)}")
+        hits = self._knowledge.search(query, folder=folder)
+        where = f" in {folder}/" if folder else ""
+        activity = ToolActivity(name="search_knowledge", ok=True,
+                                summary=f"Looked up '{query[:60]}'{where}: {len(hits)} passage{'s' * (len(hits) != 1)}")
         if not hits:
+            if folder == EXPERIMENTS:
+                return f"No past experiments in this lab match '{query}'.", activity
             docs = self._knowledge.describe()
-            return f"No passages match '{query}'. Documents available: {docs}", activity
-        lines = [
-            f"<passage doc=\"{p.doc}\" title=\"{self._knowledge.title(p.doc)}\"" + (f" page=\"{p.page}\"" if p.page else "")
-            + f" score=\"{score:.1f}\">\n{p.text[:1200]}\n</passage>"
-            for p, score in hits
-        ]
+            return f"No passages match '{query}'{where}. Documents available: {docs}", activity
+        lines = []
+        for p, score in hits:
+            doc = self._knowledge.document(p.doc)
+            rating = f" rating=\"{RATING_LABEL[doc.rating]}\"" if doc and p.doc.startswith(EXPERIMENTS + "/") else ""
+            lines.append(
+                f"<passage doc=\"{p.doc}\" title=\"{self._knowledge.title(p.doc)}\"" + (f" page=\"{p.page}\"" if p.page else "")
+                + f"{rating} score=\"{score:.1f}\">\n{p.text[:1200]}\n</passage>"
+            )
         return "\n\n".join(lines), activity
 
     def _read_knowledge(self, args: dict[str, Any]) -> tuple[str, ToolActivity]:
@@ -1023,23 +1142,7 @@ def describe_run(run: dict[str, Any], results: dict[str, Any] | None, analyses: 
             stats += f", min {min(numbers):.4g}, max {max(numbers):.4g}, mean {sum(numbers) / len(numbers):.4g}"
         lines.append(f"Measurement '{m['label']}' ({m.get('unit', '')}): {stats}")
         lines.append("Values by well: " + json.dumps(values)[:4000])
-    for a in analyses or []:
-        if a.get("error"):
-            lines.append(f"Analysis '{a['title']}': could not be computed: {a['error']}")
-            continue
-        lines.append(f"Analysis '{a['title']}' ({a['kind']}, computed by the lab software; quote these numbers, don't recompute):")
-        for s in a["series"]:
-            if s.get("fit"):
-                lines.append(f"- {s['name']}: {s['fit']['equation']}, R² {s['fit']['r2']}"
-                             + (f", EC50 {s['fit']['ec50']}" if s['fit'].get('ec50') is not None else "")
-                             + (f", efficiency {s['fit']['efficiency_percent']}%" if s['fit'].get('efficiency_percent') is not None else ""))
-        for r in a["samples"]:
-            lines.append(f"- sample {r['name']}: {r['value']} {a['x_label']} (CV {r['cv']}%)" + (f" [{r['flag']}]" if r["flag"] else ""))
-        for g in a["groups"]:
-            lines.append(f"- group {g['name']}: mean {g['mean']} ± {g['sd']} (n={g['n']})"
-                         + (f", fold change {g['fold_change']}, p={g['p_value']}" if g["fold_change"] is not None else ""))
-        for w in a["warnings"]:
-            lines.append(f"- note: {w}")
+    lines += describe_results(analyses or [], header=", computed by the lab software; quote these numbers, don't recompute")
     return "<run_data>\n" + "\n".join(lines) + "\n</run_data>"
 
 

@@ -287,6 +287,7 @@ input[aria-invalid="true"] { border-color: var(--critical); }
 .tool-chip svg { width: 14px; height: 14px; flex: none; margin-top: 2px; }
 .tool-chip.ok svg { color: var(--good); }
 .tool-chip.bad svg { color: var(--critical); }
+.tool-chip.notice svg { color: var(--warning); }
 .status-line { display: flex; align-items: center; gap: 8px; color: var(--muted); font-size: 12.5px; }
 .status-line svg { width: 14px; height: 14px; animation: spin 1s linear infinite; color: var(--accent); }
 .msg-error { color: var(--critical-ink); font-size: 13px; }
@@ -587,6 +588,9 @@ svg.chart .mark:focus-visible circle:last-child, svg.chart .mark:focus-visible p
 #plan-intro { margin: 0 0 10px; }
 .explain { border-top: 1px solid var(--hairline); padding-top: 12px; margin-bottom: 12px; }
 .explain-text { margin: 0; font-size: 13.5px; white-space: pre-wrap; }
+.feedback { border-top: 1px solid var(--hairline); padding-top: 12px; margin-bottom: 12px; display: grid; gap: 10px; }
+.feedback .segmented { margin-bottom: 0; justify-self: start; }
+.feedback-actions { display: flex; justify-content: flex-end; }
 
 .tooltip {
   position: fixed; z-index: 20; pointer-events: none;

@@ -9,7 +9,7 @@ from fastapi.testclient import TestClient
 from protocol_tool.main import create_app
 from protocol_tool.master import MasterClient
 
-from .conftest import GOOD_PROTOCOL, FakeMaster, FakeModel, tool_use
+from .conftest import GOOD_PROTOCOL, LATEST, FakeMaster, FakeModel, tool_use
 
 
 def make_client(settings, turns=()):
@@ -152,7 +152,7 @@ def test_designs_checked_under_older_rules_are_checked_again_before_review(setti
     from protocol_tool.simulator import DeckRules, simulate
     from protocol_tool.store import SessionStore
 
-    old_code = GOOD_PROTOCOL.replace('"2.29"', '"2.20"')
+    old_code = GOOD_PROTOCOL.replace(f'"{LATEST}"', '"2.20"')
     store = SessionStore(settings.server.database)
     session = Session.model_validate({"design": {
         "protocols": [{"id": "main", "code": old_code, "version": 1, "plate_slot": "D2"}],
@@ -169,7 +169,7 @@ def test_designs_checked_under_older_rules_are_checked_again_before_review(setti
         response = client.post(f"/api/sessions/{session.id}/plan", json=SEND)
         assert response.status_code == 409 and "failed simulation" in response.json()["detail"]
         errors = client.get(f"/api/sessions/{session.id}").json()["design"]["protocols"][0]["simulation"]["errors"]
-        assert any("API level 2.29 (this protocol uses 2.20)" in e for e in errors)
+        assert any(f"API level {LATEST} (this protocol uses 2.20)" in e for e in errors)
         assert master.planned == []
 
 

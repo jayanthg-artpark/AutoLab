@@ -238,6 +238,27 @@
         </div>
         <p class="explain-text" id="explain-text"></p>
       </div>
+      <form class="feedback" id="feedback" hidden>
+        <div class="panel-head">
+          <div>
+            <h3>How did it go?</h3>
+            <p class="muted small">Goes into the lab's experiment notebook. The assistant reuses runs that worked and warns about ones that failed when anyone designs a similar experiment.</p>
+          </div>
+          <span class="muted small" id="feedback-saved" aria-live="polite"></span>
+        </div>
+        <div class="segmented" role="radiogroup" aria-label="How the run went" id="feedback-rating">
+          <button type="button" role="radio" data-rating="worked">Worked</button>
+          <button type="button" role="radio" data-rating="partly">Partly worked</button>
+          <button type="button" role="radio" data-rating="failed">Failed</button>
+        </div>
+        <label>What to change next time <span class="optional">(optional)</span>
+          <textarea id="feedback-notes" rows="3" maxlength="2000"
+            placeholder="e.g. the top standard was saturated; start the curve at 1000 µg/mL"></textarea>
+        </label>
+        <div class="feedback-actions">
+          <button type="submit" class="btn primary small" id="feedback-save" disabled>Save to notebook</button>
+        </div>
+      </form>
       <details class="events">
         <summary>Event log <span class="muted" id="event-count"></span></summary>
         <ol id="events"></ol>

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import copy
 import json
+import re
 from pathlib import Path
 from typing import Any
 
@@ -10,9 +11,13 @@ import pytest
 
 from protocol_tool.assistant import ModelTurn
 from protocol_tool.config import Settings
+from protocol_tool.simulator import latest_api_level
 
 FIXTURES = Path(__file__).parent / "fixtures"
-GOOD_PROTOCOL = (FIXTURES / "dilution_series.py").read_text(encoding="utf-8")
+# The newest API level the installed opentrons supports: the lab always runs the newest software.
+LATEST = latest_api_level()
+GOOD_PROTOCOL = re.sub(r'"apiLevel": "[\d.]+"', f'"apiLevel": "{LATEST}"',
+                       (FIXTURES / "dilution_series.py").read_text(encoding="utf-8"))
 BROKEN_PROTOCOL = GOOD_PROTOCOL.replace('"nest_12_reservoir_15ml"', '"no_such_reservoir"')
 
 

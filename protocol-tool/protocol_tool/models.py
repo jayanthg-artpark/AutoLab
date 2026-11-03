@@ -494,3 +494,11 @@ class SendRequest(BaseModel):
     labware: str = Field(default="", max_length=128)
     # From the plan the scientist reviewed and approved; sending fails if the design changed since.
     plan_hash: str = Field(default="", max_length=64)
+
+
+class RunFeedback(BaseModel):
+    """The scientist's verdict on a finished run, kept in the lab's experiment notebook."""
+
+    rating: Literal["worked", "partly", "failed"]
+    # What to change next time, e.g. "the top standard was saturated; start at 1000 ug/mL".
+    notes: str = Field(default="", max_length=2000)

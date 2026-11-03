@@ -46,6 +46,21 @@ class SessionStore:
                        send TEXT NOT NULL,
                        doc TEXT NOT NULL)"""
             )
+            # The scientist's rating of a finished run and what to change next time.
+            self._conn.execute(
+                """CREATE TABLE IF NOT EXISTS run_feedback (
+                       run_id TEXT PRIMARY KEY,
+                       rating TEXT NOT NULL,
+                       notes TEXT NOT NULL,
+                       updated_at TEXT NOT NULL)"""
+            )
+            # Runs already written to the experiment notebook, so a record someone deleted stays deleted.
+            self._conn.execute(
+                """CREATE TABLE IF NOT EXISTS experiment_records (
+                       run_id TEXT PRIMARY KEY,
+                       doc TEXT NOT NULL,
+                       written_at TEXT NOT NULL)"""
+            )
 
     def save(self, session: Session) -> None:
         session.updated_at = utcnow()
@@ -84,6 +99,36 @@ class SessionStore:
                 (run_id, status, text, now),
             )
         return {"run_id": run_id, "status": status, "text": text, "created_at": now}
+
+    def run_feedback(self, run_id: str) -> dict[str, str] | None:
+        with self._lock:
+            row = self._conn.execute("SELECT rating, notes, updated_at FROM run_feedback WHERE run_id = ?", (run_id,)).fetchone()
+        return {"run_id": run_id, "rating": row[0], "notes": row[1], "updated_at": row[2]} if row else None
+
+    def save_run_feedback(self, run_id: str, rating: str, notes: str) -> dict[str, str]:
+        now = utcnow().isoformat()
+        with self._lock, self._conn:
+            self._conn.execute(
+                """INSERT INTO run_feedback (run_id, rating, notes, updated_at) VALUES (?, ?, ?, ?)
+                   ON CONFLICT (run_id) DO UPDATE SET rating = excluded.rating, notes = excluded.notes,
+                       updated_at = excluded.updated_at""",
+                (run_id, rating, notes, now),
+            )
+        return {"run_id": run_id, "rating": rating, "notes": notes, "updated_at": now}
+
+    def experiment_record(self, run_id: str) -> str | None:
+        """The knowledge document id of the run's experiment record, if one was written."""
+        with self._lock:
+            row = self._conn.execute("SELECT doc FROM experiment_records WHERE run_id = ?", (run_id,)).fetchone()
+        return row[0] if row else None
+
+    def save_experiment_record(self, run_id: str, doc: str) -> None:
+        with self._lock, self._conn:
+            self._conn.execute(
+                """INSERT INTO experiment_records (run_id, doc, written_at) VALUES (?, ?, ?)
+                   ON CONFLICT (run_id) DO UPDATE SET doc = excluded.doc, written_at = excluded.written_at""",
+                (run_id, doc, utcnow().isoformat()),
+            )
 
     def save_run_design(self, run_id: str, session: Session, send: dict) -> None:
         """Snapshot of the design (and the run details entered) as it was sent as `run_id`."""

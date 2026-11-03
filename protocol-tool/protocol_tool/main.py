@@ -27,13 +27,15 @@ from .knowledge import Knowledge
 from .model_status import ModelChecker, ModelError, build_checker
 from .providers import resolve
 from .config import Settings, load_settings
+from .experiments import experiment_record, write_record
 from .master import MasterClient, MasterError, MasterUnavailable
-from .models import ChatEntry, DesignPatch, SendRequest, Session
+from .models import ChatEntry, DesignPatch, RunFeedback, SendRequest, Session
 from .simulator import DeckRules, SimulatorUnavailable, simulate
 from .store import SessionStore
 from .workflow import WorkflowError, build_submission, plan_hash, slug
 
 INSTRUMENTS_TTL_S = 30.0
+RECORD_INTERVAL_S = 60.0  # how often finished runs are added to the experiment notebook
 FINISHED = {"succeeded", "failed", "aborted", "interrupted"}
 
 log = logging.getLogger(__name__)
@@ -112,7 +114,10 @@ def create_app(
         startup_check = asyncio.create_task(checker.log_startup()) if checker else None
         # Index the knowledge folder in the background, so the first lookup doesn't wait for it.
         warm_knowledge = asyncio.create_task(asyncio.to_thread(knowledge.documents))
+        recorder = asyncio.create_task(record_finished_runs()) if settings.knowledge.record_experiments else None
         yield
+        if recorder:
+            recorder.cancel()
         warm_knowledge.cancel()
         if startup_check:
             startup_check.cancel()
@@ -349,6 +354,58 @@ def create_app(
             raise HTTPException(502, str(exc)) from exc
         return run, results
 
+    # --- Experiment notebook: a record of each finished run, with the scientist's rating ----------
+
+    async def record_experiment(run_id: str, run: dict[str, Any] | None = None, results: dict[str, Any] | None = None) -> str | None:
+        """Writes (or rewrites) the run's experiment record; returns its knowledge document id."""
+        if run is None:
+            run, results = await run_and_results(run_id)
+        if run["status"] not in FINISHED:
+            return None
+        analyses = await asyncio.to_thread(analyse_run, run.get("protocol", {}).get("analysis") or [], results)
+        found = store.run_design(run_id)
+        note = store.run_note(run_id)
+        text = experiment_record(
+            run, found[0].design if found else None, analyses=analyses, results=results,
+            note=note["text"] if note else "", feedback=store.run_feedback(run_id),
+        )
+        doc = await asyncio.to_thread(write_record, knowledge.root, run_id, text)
+        store.save_experiment_record(run_id, doc)
+        return doc
+
+    async def record_finished_runs() -> None:
+        """Adds every newly finished run to the notebook, whether or not anyone opens it."""
+        while True:
+            try:
+                response = await master.request("GET", "/runs", params={"limit": 50})
+                runs = response.json() if response.is_success else []
+            except (MasterUnavailable, ValueError):
+                runs = []  # try again next time
+            for summary in runs:
+                if summary["status"] in FINISHED and store.experiment_record(summary["id"]) is None:
+                    try:
+                        await record_experiment(summary["id"])
+                    except Exception as exc:
+                        log.warning("Could not record run %s in the experiment notebook: %s", summary["id"],
+                                    exc.detail if isinstance(exc, HTTPException) else exc)
+            await asyncio.sleep(RECORD_INTERVAL_S)
+
+    @app.get("/api/runs/{run_id}/feedback")
+    async def read_feedback(run_id: str) -> dict[str, Any]:
+        return {"enabled": settings.knowledge.record_experiments, "feedback": store.run_feedback(run_id),
+                "record": store.experiment_record(run_id)}
+
+    @app.put("/api/runs/{run_id}/feedback")
+    async def save_feedback(run_id: str, feedback: RunFeedback) -> dict[str, Any]:
+        """The scientist's rating and notes; the run's experiment record is rewritten with them."""
+        if not settings.knowledge.record_experiments:
+            raise HTTPException(403, "The experiment notebook is turned off ([knowledge] record_experiments = false)")
+        run, results = await run_and_results(run_id)
+        if run["status"] not in FINISHED:
+            raise HTTPException(409, "The run hasn't finished yet")
+        saved = store.save_run_feedback(run_id, feedback.rating, feedback.notes.strip())
+        return {"enabled": True, "feedback": saved, "record": await record_experiment(run_id, run, results)}
+
     @app.get("/api/runs/{run_id}/analysis")
     async def run_analysis(run_id: str) -> dict[str, Any]:
         """The run's planned analyses (curve fits, interpolated samples, comparisons) on its readings."""
@@ -385,7 +442,10 @@ def create_app(
             raise HTTPException(503, f"The AI model could not summarise the run: {exc}") from exc
         if not text:
             raise HTTPException(503, "The AI model returned no summary")
-        return {"enabled": True, "note": store.save_run_note(run_id, run["status"], text)}
+        saved = store.save_run_note(run_id, run["status"], text)
+        if settings.knowledge.record_experiments and store.experiment_record(run_id):
+            await record_experiment(run_id, run, results)  # the record includes the summary
+        return {"enabled": True, "note": saved}
 
     # --- Runs, relayed from the master node -----------------------------------------
 

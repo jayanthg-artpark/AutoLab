@@ -52,6 +52,9 @@ class AssistantSettings:
     api_key_env: str = ""  # environment/.env variable holding the key; empty = the provider's default
     # Models to try when the main one is overloaded, out of quota or retired; None = the provider's default.
     fallback_models: list[str] | None = None
+    # Other providers to continue with, in order, when every model of this one is out of quota,
+    # busy or unreachable, e.g. ["ollama"] or ["ollama", "claude"]; None = the provider's default.
+    fallback_providers: list[str] | None = None
     effort: str = "high"  # Claude only: low | medium | high | xhigh | max
     # Most tool calls (look up, write protocol, simulate, fix, set workflow) the model may make in one reply.
     max_tool_rounds: int = 16
@@ -99,6 +102,9 @@ class LabSettings:
 class KnowledgeSettings:
     # Folder with manuals/ (kit manuals, IFUs) and templates/ (assay templates) the assistant can search.
     folder: str = "knowledge"
+    # Keep a record of every finished run in experiments/ (the lab's experiment notebook),
+    # with the scientist's rating, so the assistant learns from the lab's own past runs.
+    record_experiments: bool = True
 
 
 @dataclass

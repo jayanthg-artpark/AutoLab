@@ -18,6 +18,8 @@ class Provider:
     free: bool
     # Tried in order when the model is overloaded, out of quota or retired (OpenAI-compatible only).
     fallback_models: tuple[str, ...] = ()
+    # Other providers (PRESETS names) to continue with when every model of this one can't answer.
+    fallback_providers: tuple[str, ...] = ()
 
 
 PRESETS = {
@@ -53,7 +55,22 @@ def resolve(settings: AssistantSettings) -> Provider:
         url=(settings.url or preset.url).rstrip("/"),
         key_env=settings.api_key_env or preset.key_env,
         fallback_models=tuple(settings.fallback_models) if settings.fallback_models is not None else preset.fallback_models,
+        fallback_providers=(tuple(settings.fallback_providers) if settings.fallback_providers is not None
+                            else preset.fallback_providers),
     )
     if provider.name == "openai" and not (provider.url and provider.model):
         raise ValueError('[assistant] provider "openai" needs url and model')
     return provider
+
+
+def fallbacks(provider: Provider) -> list[Provider]:
+    """The providers to continue with, in order, each with its default model and key."""
+    out = []
+    for name in dict.fromkeys(provider.fallback_providers):
+        if name == provider.name:
+            continue
+        if name not in PRESETS or name == "openai":
+            raise ValueError(f"[assistant] fallback_providers can name {', '.join(n for n in PRESETS if n != 'openai')}, "
+                             f"not {name!r}")
+        out.append(PRESETS[name])
+    return out
