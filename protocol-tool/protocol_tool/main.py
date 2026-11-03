@@ -29,10 +29,10 @@ from .providers import resolve
 from .config import Settings, load_settings
 from .experiments import experiment_record, write_record
 from .master import MasterClient, MasterError, MasterUnavailable
-from .models import ChatEntry, DesignPatch, RunFeedback, SendRequest, Session
-from .simulator import DeckRules, SimulatorUnavailable, simulate
+from .models import ChatEntry, Design, DesignPatch, ProtocolDraft, RunFeedback, SendRequest, Session, Simulation
+from .simulator import DeckRules, DeckTips, SimulatorUnavailable, simulate
 from .store import SessionStore
-from .workflow import WorkflowError, build_submission, plan_hash, slug
+from .workflow import WorkflowError, build_submission, liquid_protocols, plan_hash, slug, tips_before
 
 INSTRUMENTS_TTL_S = 30.0
 RECORD_INTERVAL_S = 60.0  # how often finished runs are added to the experiment notebook
@@ -103,9 +103,33 @@ def create_app(
             return "rejected", detail if isinstance(detail, str) else json.dumps(detail)[:1000]
         return "unavailable", f"master node returned {response.status_code}: {str(body)[:300]}"
 
+    async def deck_tips(design: Design, protocol: ProtocolDraft) -> DeckTips | None:
+        """The protocol as the Flex would get it when its run starts: after the runs queued ahead and the
+        protocols before it in this workflow have taken their tips. None if the master node can't say."""
+        body = {"protocol_b64": base64.b64encode(protocol.code.encode()).decode(), "after": tips_before(design, protocol.id)}
+        try:
+            response = await master.request("POST", "/tips/continue", json=body)
+            if not response.is_success:
+                return None
+            data = response.json()
+            return DeckTips(
+                run_code=base64.b64decode(data["protocol_b64"]).decode(), used=data["used"],
+                load_names={r["slot"]: r["load_name"] for r in data.get("racks", [])}, runs_ahead=data.get("runs_ahead", 0),
+            )
+        except (MasterUnavailable, ValueError, KeyError):
+            return None
+
+    async def simulate_protocol(design: Design, protocol: ProtocolDraft, tips: DeckTips | None = None) -> Simulation:
+        """Simulates a protocol starting from the tips left on the deck, as its run will."""
+        return await simulate(
+            protocol.code, protocol.plate_slot, python=settings.simulator.python, timeout_s=settings.simulator.timeout_s,
+            rules=DeckRules.from_settings(settings.lab, settings.simulator.python),
+            deck_tips=tips or await deck_tips(design, protocol),
+        )
+
     assistant = Assistant(
         settings, store, model, checker, tip_racks=tip_racks_on_deck,
-        instruments=lab_instruments, preview_plan=preview_plan, knowledge=knowledge,
+        instruments=lab_instruments, preview_plan=preview_plan, knowledge=knowledge, simulate_protocol=simulate_protocol,
     )
 
     @asynccontextmanager
@@ -214,16 +238,15 @@ def create_app(
         session = get_session(session_id)
         require_idle(session)
         design = session.design
-        targets = [design.protocol(protocol)] if protocol else [p for p in design.protocols if p.code]
+        # In workflow order: each protocol starts where the ones before it leave the tip racks.
+        in_workflow = liquid_protocols(design)
+        ordered = in_workflow + [p for p in design.protocols if p.code and all(p is not q for q in in_workflow)]
+        targets = [design.protocol(protocol)] if protocol else ordered
         if not targets or targets[0] is None or not targets[0].code:
             raise HTTPException(400, "There is no protocol to simulate yet")
         for p in targets:
             try:
-                p.simulation = await simulate(
-                    p.code, p.plate_slot,
-                    python=settings.simulator.python, timeout_s=settings.simulator.timeout_s,
-                    rules=DeckRules.from_settings(settings.lab, settings.simulator.python),
-                )
+                p.simulation = await simulate_protocol(design, p)
             except SimulatorUnavailable as exc:
                 raise HTTPException(503, str(exc)) from exc
             store.save(session)
@@ -241,13 +264,16 @@ def create_app(
         )
 
     async def submission_for(session: Session, request: SendRequest) -> dict[str, Any]:
-        # A protocol checked under older lab rules (API level, labware list) is checked again first.
+        # A protocol checked under older lab rules (API level, labware list), or against tip racks that
+        # have changed since (another run took tips), is checked again first, in workflow order.
         rules = DeckRules.from_settings(settings.lab, settings.simulator.python)
-        for p in session.design.protocols:
-            if p.code and p.simulation_current and p.simulation.rules != rules.signature:
+        for p in liquid_protocols(session.design):
+            if not p.simulation_current:
+                continue
+            tips = await deck_tips(session.design, p)
+            if p.simulation.rules != rules.signature or (tips and p.simulation.tip_state != tips.used):
                 try:
-                    p.simulation = await simulate(p.code, p.plate_slot, python=settings.simulator.python,
-                                                  timeout_s=settings.simulator.timeout_s, rules=rules)
+                    p.simulation = await simulate_protocol(session.design, p, tips)
                 except SimulatorUnavailable as exc:
                     raise HTTPException(503, str(exc)) from exc
                 store.save(session)
@@ -272,10 +298,12 @@ def create_app(
         if status == "rejected":
             raise HTTPException(422, f"The master node can't run this: {data}")
         instruments = await lab_instruments() or []
+        tips = [{"protocol": p.title or p.id, **rack} for p in liquid_protocols(session.design) for rack in p.simulation.tip_racks]
         return {
             "plan_hash": plan_hash(submission),
             "steps": data["steps"],
             "warnings": data.get("warnings", []),
+            "tips": tips,
             "instruments": {i["id"]: {"name": i["name"], "kind": i["kind"], "driver": i["driver"]} for i in instruments},
         }
 

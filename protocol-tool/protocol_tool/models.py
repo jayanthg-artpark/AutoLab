@@ -190,6 +190,14 @@ class Simulation(BaseModel):
     tips: list[dict[str, Any]] = Field(default_factory=list)
     # The lab rules (DeckRules.signature) this was checked against; "" = before rules were recorded.
     rules: str = ""
+    # Tips already used per rack slot when this was simulated (the racks on the deck after the runs
+    # queued ahead); the simulation starts each pipette there, as the run will. None = not known
+    # (the master node couldn't be reached): simulated with full racks.
+    tip_state: dict[str, int] | None = None
+    # Per rack the protocol picks tips from: {"slot", "load_name", "pipette", "before", "after"}
+    # (tips used before and after this protocol, of 96).
+    tip_racks: list[dict[str, Any]] = Field(default_factory=list)
+    runs_ahead: int = 0  # runs queued ahead whose protocols will take tips first
 
 
 # --- Design: requirements, protocols, workflow ------------------------------------------

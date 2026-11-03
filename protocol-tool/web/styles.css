@@ -586,6 +586,10 @@ svg.chart .mark:focus-visible circle:last-child, svg.chart .mark:focus-visible p
 .plan-steps .step-icon { border-style: dashed; }
 .device-tag.sim { color: var(--muted); border-style: dashed; }
 #plan-intro { margin: 0 0 10px; }
+.plan-tips { margin: 0 0 10px; font-size: 13px; }
+.plan-tips h3 { font-size: 13px; margin: 0 0 4px; }
+.plan-tips ul { margin: 0; padding: 0; list-style: none; display: grid; gap: 4px; }
+.plan-tips .slot-tag { font-weight: 700; font-size: 12px; color: var(--ink-2); border: 1px solid var(--border); border-radius: 6px; padding: 1px 6px; }
 .explain { border-top: 1px solid var(--hairline); padding-top: 12px; margin-bottom: 12px; }
 .explain-text { margin: 0; font-size: 13.5px; white-space: pre-wrap; }
 .feedback { border-top: 1px solid var(--hairline); padding-top: 12px; margin-bottom: 12px; display: grid; gap: 10px; }

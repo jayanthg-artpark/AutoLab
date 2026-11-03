@@ -18,7 +18,7 @@ import subprocess
 import sys
 import tempfile
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from fnmatch import fnmatchcase
 from functools import lru_cache
 from pathlib import Path
@@ -247,12 +247,25 @@ class SimulatorUnavailable(RuntimeError):
     """The Opentrons package could not be run at all (as opposed to a protocol error)."""
 
 
+@dataclass
+class DeckTips:
+    """The tip racks as the run will find them, from the master node's POST /tips/continue."""
+
+    run_code: str  # the protocol with the master node's lines that start each pipette at its next unused tip
+    used: dict[str, int]  # tips gone per rack slot, after the runs queued ahead
+    load_names: dict[str, str] = field(default_factory=dict)  # what the master node's records say each slot holds
+    runs_ahead: int = 0
+
+
 async def simulate(
-    code: str, plate_slot: str, python: str = "", timeout_s: float = 120, rules: DeckRules | None = None
+    code: str, plate_slot: str, python: str = "", timeout_s: float = 120, rules: DeckRules | None = None,
+    deck_tips: DeckTips | None = None,
 ) -> Simulation:
+    """Simulates the protocol; with `deck_tips`, starting from the tips left on the deck, as the run will."""
     started = time.monotonic()
-    analysis = await asyncio.to_thread(_run_analysis, code, python or sys.executable, timeout_s)
-    sim = parse_analysis(analysis, code, plate_slot, rules)
+    run_code = deck_tips.run_code if deck_tips else code
+    analysis = await asyncio.to_thread(_run_analysis, run_code, python or sys.executable, timeout_s)
+    sim = parse_analysis(analysis, code, plate_slot, rules, deck_tips)
     sim.duration_s = round(time.monotonic() - started, 2)
     return sim
 
@@ -291,17 +304,26 @@ def _run_analysis(code: str, python: str, timeout_s: float, attempts: int = 3) -
 
 
 def parse_analysis(
-    analysis: dict[str, Any], code: str, plate_slot: str, rules: DeckRules | None = None
+    analysis: dict[str, Any], code: str, plate_slot: str, rules: DeckRules | None = None,
+    deck_tips: DeckTips | None = None,
 ) -> Simulation:
     commands: list[dict[str, Any]] = analysis.get("commands", [])
     deck = _build_deck(analysis, commands, code)
     # A protocol that breaks the lab's deck rules fails like a simulator error, so it can't be sent.
-    tips, tip_problems = _tip_use(analysis, commands, deck)
+    tips, tip_problems, tip_racks = _tip_use(analysis, commands, deck, deck_tips)
     rules = rules or DeckRules()
     errors = [_error_text(e) for e in analysis.get("errors", [])] + deck_problems(deck, plate_slot, rules)
     errors += flex_problems(analysis, commands, rules) + tip_problems
+    if any("OutOfTips" in str(e) or "out of tips" in str(e).lower() for e in analysis.get("errors", [])):
+        errors.append(_out_of_tips(tip_racks, deck_tips))
 
     warnings = []
+    picked = {r["slot"] for r in tip_racks}
+    for slot, contents in deck.slots.items():
+        for lw in contents.labware:
+            if lw.category == "tipRack" and slot not in picked:
+                why = " (the racks on the deck before it have enough tips)" if deck_tips else ""
+                warnings.append(f"The tip rack in {slot} is never used{why}. Remove it, so staff don't put a rack there for nothing.")
     plate = deck.plate_at(plate_slot) if plate_slot else None
     if plate is not None and plate.category not in ("wellPlate", ""):
         warnings.append(f"Slot {plate_slot} holds {plate.display_name}, not a well plate.")
@@ -328,15 +350,32 @@ def parse_analysis(
         stats=stats,
         tips=tips,
         rules=rules.signature,
+        tip_state=dict(deck_tips.used) if deck_tips else None,
+        tip_racks=tip_racks,
+        runs_ahead=deck_tips.runs_ahead if deck_tips else 0,
     )
 
 
-def _tip_use(analysis: dict[str, Any], commands: list[dict[str, Any]], deck: Deck) -> tuple[list[dict[str, Any]], list[str]]:
-    """How each pipette uses tips, in the order it uses its racks, plus any rack shared by two pipettes."""
+def _out_of_tips(tip_racks: list[dict[str, Any]], deck_tips: DeckTips | None) -> str:
+    """Why a pipette ran out of tips, and the two ways to fix it."""
+    left = ", ".join(f"{r['slot']} {r['load_name']} had {RACK_SIZE - r['before']} of {RACK_SIZE} left" for r in tip_racks)
+    where = f"the racks on the deck ({left})" if deck_tips and left else f"its tip racks ({left})" if left else "its tip racks"
+    return (f"A pipette ran out of tips: this protocol needs more than {where}. Either load another rack of the same "
+            "type in a free slot and list it after the existing one in tip_racks=[...] (lab staff put a full rack "
+            "there), or tell the scientist to replace the rack with a full one and click New rack on the Runs tab.")
+
+
+def _tip_use(
+    analysis: dict[str, Any], commands: list[dict[str, Any]], deck: Deck, deck_tips: DeckTips | None = None,
+) -> tuple[list[dict[str, Any]], list[str], list[dict[str, Any]]]:
+    """How each pipette uses tips (in the order it uses its racks), problems (a rack shared by two
+    pipettes, a rack type the lab's records don't match), and per rack: tips used before and after."""
     where = {lw.id: (slot, lw.load_name) for slot, contents in deck.slots.items() for lw in contents.labware}
     names = {p["id"]: p.get("pipetteName", "pipette") for p in analysis.get("pipettes", [])}
+    used = deck_tips.used if deck_tips else {}
     uses: dict[str, dict[str, Any]] = {}
     owner: dict[str, str] = {}
+    racks: dict[str, dict[str, Any]] = {}
     problems = set()
     for cmd in commands:
         if cmd.get("commandType") != "pickUpTip":
@@ -356,7 +395,27 @@ def _tip_use(analysis: dict[str, Any], commands: list[dict[str, Any]], deck: Dec
                 f"The tip rack in {slot} is used by two pipettes. Give each pipette its own tip rack "
                 "so the lab can keep track of the tips."
             )
-    return list(uses.values()), sorted(problems)
+        rack = racks.setdefault(slot, {"slot": slot, "load_name": load_name, "pipette": name,
+                                       "before": used.get(slot, 0), "after": used.get(slot, 0)})
+        well = params.get("wellName", "")
+        if well in TIP_ORDER:
+            # An 8-channel takes the whole column from its row-A well; a 96-channel the whole rack.
+            taken = {1: 1, 8: 8}.get(use["channels"], RACK_SIZE)
+            rack["after"] = max(rack["after"], TIP_ORDER.index(well) + taken)
+    if deck_tips:
+        for slot, rack in racks.items():
+            recorded = deck_tips.load_names.get(slot)
+            if recorded and recorded != rack["load_name"]:
+                problems.add(
+                    f"The lab's records say {slot} holds {recorded}, but this protocol uses {rack['load_name']} there. "
+                    f"Use the {recorded} in {slot}, or put this tip type in a free slot."
+                )
+    return list(uses.values()), sorted(problems), list(racks.values())
+
+
+RACK_SIZE = 96
+# The order pipettes take tips in: A1, B1 ... H1, A2 ... (as the master node counts them).
+TIP_ORDER = [f"{row}{col}" for col in range(1, 13) for row in "ABCDEFGH"]
 
 
 def _channels(pipette_name: str) -> int:

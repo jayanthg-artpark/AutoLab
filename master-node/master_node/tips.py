@@ -131,6 +131,19 @@ class TipTracker:
                 )
         return before, after
 
+    def used_after(self, pending: list[list[TipUse]]) -> dict[str, int]:
+        """Tips used per rack once these protocols (queued ahead, in order) have taken theirs.
+
+        A protocol the racks can't serve is skipped: its run will fail at preflight and take none."""
+        used = {r.slot: r.used for r in self.racks()}
+        for uses in pending:
+            try:
+                _, after = self.plan(uses, used)
+            except TipProblem:
+                continue
+            used.update({slot: count for slot, (_, count) in after.items()})
+        return used
+
     def commit(self, after: dict[str, tuple[str, int]]) -> None:
         self._save(after)
 

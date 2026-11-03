@@ -51,6 +51,14 @@ class TipUse(BaseModel):
     pickups: int = Field(ge=0)
 
 
+class ContinueTips(BaseModel):
+    """A protocol to prepare as if it ran next (POST /tips/continue)."""
+
+    protocol_b64: str = Field(min_length=1, description="Opentrons Python protocol, base64-encoded")
+    # Tip use of the protocols before this one in the same run, in order.
+    after: list[list[TipUse]] = Field(default_factory=list)
+
+
 class LiquidHandlingSpec(BaseModel):
     protocol_filename: str = Field(pattern=r"^[\w\-. ]{1,120}\.py$")
     protocol_b64: str = Field(description="Opentrons Python protocol, base64-encoded")

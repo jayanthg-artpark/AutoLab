@@ -38,7 +38,8 @@ from .experiments import FOLDER as EXPERIMENTS, RATING_LABEL
 from .knowledge import FOLDERS, Knowledge
 from .model_status import ModelAuthError, ModelChecker, ModelError, ModelNotFound, auth_problem, load_key_file, masked_key
 from .models import (
-    Analysis, ChatEntry, ModelTurn, ProtocolDraft, ReaderSettings, ReadStep, Requirements, Session, ToolActivity, WorkflowStep,
+    Analysis, ChatEntry, ModelTurn, ProtocolDraft, ReaderSettings, ReadStep, Requirements, Session, Simulation, ToolActivity,
+    WorkflowStep,
 )
 from .providers import Provider, fallbacks, resolve
 from .simulator import DeckRules, SimulatorUnavailable, simulate
@@ -302,7 +303,7 @@ Protocol rules:
 - Load the sample plate directly on the deck (not on a module or adapter) in one of the slots Thor can reach, and give that slot as plate_slot. Thor collects it from there afterwards, so never move it elsewhere.
 - Runs are unattended: no `protocol.pause()`, no manual steps. Incubations away from the Flex are hold steps in the workflow, not delays in the protocol, unless they are short.
 - Declare starting reagents with `protocol.define_liquid()` and `well.load_liquid()`, and give labware readable labels (`label=`), so the deck view shows what goes where.
-- Tip racks stay on the Flex between runs, and the lab continues partly used racks automatically. Reuse the tip racks listed in <design_state> (same slot and type) when they suit the experiment; add a rack only for a tip size that isn't there, in a free slot, and never put other labware where a tip rack is.
+- Tip racks stay on the Flex between runs, and the lab continues partly used racks automatically: each pipette starts at its rack's next unused tip. Reuse the tip racks listed in <design_state> (same slot and type) when they suit the experiment, and never put other labware where a tip rack is. write_protocol simulates the protocol starting from the tips left on the deck (after any runs queued ahead), exactly as the run will, and reports how many tips each rack has before and after. Add a rack only when it says so: for a tip size that isn't on the deck, or when a pipette runs out of tips; then load a rack of that type in a free slot and list it after the existing one in tip_racks=[...] (staff put a full rack there), and tell the scientist. Remove any rack the simulation says is never used. Tell the scientist how many tips the run takes and what is left after it.
 - Let pipettes take tips automatically (`pick_up_tip()` without a location, or `new_tip=` in transfer/distribute); never name specific tip wells or set `starting_tip`. Give each pipette its own tip rack(s).
 
 ## Plate reader (Tecan Infinite M200 Pro)
@@ -522,6 +523,8 @@ class ModelUnavailable(Exception):
 # What the assistant can ask of the lab: the master node's registry and a dry-run plan.
 Instruments = Callable[[], Awaitable[list[dict[str, Any]] | None]]
 PlanPreview = Callable[[dict[str, Any]], Awaitable[tuple[str, Any]]]
+# Simulates a protocol of a design, starting from the tips left on the deck (see main.simulate_protocol).
+SimulateProtocol = Callable[[Any, ProtocolDraft], Awaitable[Simulation]]
 
 
 class Assistant:
@@ -535,6 +538,7 @@ class Assistant:
         instruments: Instruments | None = None,
         preview_plan: PlanPreview | None = None,
         knowledge: Knowledge | None = None,
+        simulate_protocol: SimulateProtocol | None = None,
     ):
         self._settings = settings
         self._store = store
@@ -545,6 +549,7 @@ class Assistant:
         self._instruments = instruments
         self._preview_plan = preview_plan
         self._knowledge = knowledge
+        self._simulate_protocol = simulate_protocol or self._simulate_with_full_racks
         self._locks: dict[str, asyncio.Lock] = {}
         lab = settings.lab
         self._rules = DeckRules.from_settings(lab, settings.simulator.python)
@@ -552,6 +557,13 @@ class Assistant:
         prompt = SYSTEM_PROMPT.format(deck_rules=self._rules.describe(), inventory=lab.inventory,
                                       api_level=self._rules.api_level or "2.31")
         self._system = [{"type": "text", "text": prompt, "cache_control": {"type": "ephemeral"}}]
+
+    async def _simulate_with_full_racks(self, design, protocol: ProtocolDraft) -> Simulation:
+        """Without the lab's tip counts (tests, no master node): every tip rack starts full."""
+        return await simulate(
+            protocol.code, protocol.plate_slot,
+            python=self._settings.simulator.python, timeout_s=self._settings.simulator.timeout_s, rules=self._rules,
+        )
 
     def is_busy(self, session_id: str) -> bool:
         lock = self._locks.get(session_id)
@@ -822,11 +834,7 @@ class Assistant:
         self._store.save(session)
 
         try:
-            sim = await simulate(
-                code, protocol.plate_slot,
-                python=self._settings.simulator.python, timeout_s=self._settings.simulator.timeout_s,
-                rules=self._rules,
-            )
+            sim = await self._simulate_protocol(design, protocol)
         except SimulatorUnavailable as exc:
             protocol.simulation = None
             raise ToolInputError(f"Protocol saved, but it could not be simulated: {exc}") from exc
@@ -1157,6 +1165,22 @@ def _tool_result(tool_use_id: str, content: str, is_error: bool = False) -> dict
     return result
 
 
+def describe_tips(sim) -> list[str]:
+    """Tips per rack, as the model reads them: where the run starts, how many it takes, what is left."""
+    if not sim.tip_racks:
+        return []
+    if sim.tip_state is None:
+        head = "Tips (the tip racks on the deck are unknown, so this assumed full racks):"
+    else:
+        ahead = f" after the {sim.runs_ahead} run{'s' * (sim.runs_ahead != 1)} queued ahead" if sim.runs_ahead else ""
+        head = f"Tips, starting from what is left on the deck{ahead}:"
+    return [head] + [
+        f"- {r['pipette']}: {r['after'] - r['before']} tips from {r['slot']} ({r['load_name']}): "
+        f"{96 - r['before']} of 96 left before, {96 - r['after']} after"
+        for r in sim.tip_racks
+    ]
+
+
 def describe_simulation(sim, version: int, protocol_id: str = "main") -> str:
     """The simulation result as the model reads it."""
     lines = [
@@ -1180,6 +1204,7 @@ def describe_simulation(sim, version: int, protocol_id: str = "main") -> str:
         lines.append(f"- {slot}: {' > '.join(parts) or 'empty'}")
     if sim.deck.pipettes:
         lines.append("Pipettes: " + ", ".join(f"{p.mount} {p.display_name}" for p in sim.deck.pipettes))
+    lines += describe_tips(sim)
     if not sim.ok:
         lines.append("Fix the errors and call write_protocol again with the complete file.")
     return "\n".join(lines)

@@ -267,8 +267,24 @@ Copy `config.example.toml` to `config.toml`. The settings that matter most:
 - **`[master] url` and `api_key`**: how to reach the master node.
 - **Tip racks** need no setting. The master node keeps count of the tips left
   in each rack on the Flex, and the assistant is told which racks are there so
-  it reuses them. The simulation fails if two pipettes share a tip rack, since
-  the count is kept per pipette. The **Runs** tab lists the racks with the tips
+  it reuses them. Every simulation starts each pipette at its rack's next unused
+  tip, counting the tips that runs queued ahead and earlier protocols of the
+  same run will take, exactly as the run will. So before a run is sent you
+  know:
+  - **How many tips it takes and what's left.** The simulation result, and the
+    **Tips** list in **Review plan…**, show each rack's tips left before and
+    after.
+  - **Whether the deck has enough.** If not, the simulation fails with what's
+    left, so it can't be sent. The assistant then either loads another rack of
+    that type in a free slot (used after the existing one) or asks for the rack
+    to be replaced (**New rack**).
+  - **Whether a new rack is needed at all.** A rack the protocol never picks
+    from is flagged, so nobody sets one up for nothing.
+
+  Reviewing simulates again if the counts changed since (another run took
+  tips), so a design reopened and sent again starts where the last run
+  stopped. The simulation fails if two pipettes share a tip rack, since the
+  count is kept per pipette. The **Runs** tab lists the racks with the tips
   left: click **New rack** after putting a full one on the deck, and
   **Removed** after taking one off. Details:
   [master-node/README.md](../master-node/README.md#tip-racks).

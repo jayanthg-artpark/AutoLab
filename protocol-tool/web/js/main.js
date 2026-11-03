@@ -242,6 +242,16 @@ function showPlan(plan, body) {
     + "This is exactly what the master node will do. Approving sends it to the lab queue."
     + (simulated.length ? ` Simulated (no real instrument): ${simulated.join(", ")}.` : "");
   $("plan-warnings").replaceChildren(...plan.warnings.map((w) => h("li", { class: "warning" }, w)));
+  // Simulated from the tips left on the deck after the runs queued ahead, as the run will use them.
+  const tips = plan.tips ?? [];
+  $("plan-tips").hidden = !tips.length;
+  $("plan-tips-list").replaceChildren(...tips.map((t) => {
+    const size = /tiprack_(\d+)ul/.exec(t.load_name);
+    const name = size ? `${size[1]} µL ${t.load_name.includes("filter") ? "filter " : ""}tips` : t.load_name;
+    return h("li", {},
+      h("span", { class: "slot-tag" }, t.slot),
+      ` ${name}: ${t.after - t.before} used by ${t.protocol} · ${96 - t.before} → ${96 - t.after} of 96 left`);
+  }));
   $("plan-steps").replaceChildren(
     ...plan.steps.slice(1).map((step) => {
       const detail = step.key === "transfer" ? `${where(step.params.from)} → ${where(step.params.to)}` : step.params.summary ?? "";
