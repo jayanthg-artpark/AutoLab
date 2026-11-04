@@ -45,6 +45,9 @@ SECRET_ENV = re.compile(r"KEY|TOKEN|SECRET|PASSWORD|CREDENTIAL|ANTHROPIC", re.IG
 
 
 FLEX_ROBOT = "OT-3 Standard"  # how the analysis names the Flex
+# Wells deeper than this (15 and 50 mL conical tubes) must be aspirated from relative to the
+# liquid surface; the next deepest Opentrons labware (2 mL tubes, deep-well plates) is 45 mm.
+DEEP_WELL_MM = 60
 
 # Pipette load names (what protocols write) -> the names the analysis and the robot report.
 PIPETTE_INTERNAL = {
@@ -156,6 +159,15 @@ class DeckRules:
                 "rack\"). Load what the scientist says is on the deck, or the lab's stock labware when they don't say; never "
                 "load a different labware as a stand-in (a 15 mL tube rack for 50 mL tubes puts the pipette in the wrong place)."
             )
+        lines.append(
+            f"- Aspirating from 15 and 50 mL tubes (wells deeper than {DEEP_WELL_MM} mm): always just below the liquid "
+            "surface, never at the default 1 mm above the bottom or another fixed height (the check fails those). "
+            "Volume in the tube given: declare it once with tube.load_liquid(liquid, volume_ul) and aspirate at "
+            "tube.meniscus(z=-2, target=\"end\"); the robot follows the level down as it takes liquid. Volume not "
+            "given: pick up a fresh tip, pipette.measure_liquid_height(tube) (the Flex finds the surface coming down "
+            "from the top), then aspirate at tube.meniscus(z=-2, target=\"end\"). See "
+            "reference/opentrons-labware/liquid-height.md."
+        )
         if self.pipettes:
             lines.append("- Pipettes on the robot (load exactly these, on these mounts; nothing else): "
                          + ", ".join(f'protocol.load_instrument("{p}", "{m}")' for m, p in self.pipettes) + ".")
@@ -327,7 +339,7 @@ def parse_analysis(
     tips, tip_problems, tip_racks = _tip_use(analysis, commands, deck, deck_tips)
     rules = rules or DeckRules()
     errors = [_error_text(e) for e in analysis.get("errors", [])] + deck_problems(deck, plate_slot, rules)
-    errors += flex_problems(analysis, commands, rules) + tip_problems
+    errors += flex_problems(analysis, commands, rules) + tip_problems + deep_well_problems(commands)
     if any("OutOfTips" in str(e) or "out of tips" in str(e).lower() for e in analysis.get("errors", [])):
         errors.append(_out_of_tips(tip_racks, deck_tips))
 
@@ -376,6 +388,35 @@ def parse_analysis(
         tip_racks=tip_racks,
         runs_ahead=deck_tips.runs_ahead if deck_tips else 0,
     )
+
+
+def deep_well_problems(commands: list[dict[str, Any]]) -> list[str]:
+    """Aspirates from 15 and 50 mL tubes at a fixed height instead of just below the liquid surface.
+    A plain aspirate(volume, tube) goes 1 mm above the bottom, so the tip, and in a full tube the
+    pipette itself, goes deep into the liquid; a fixed height higher up draws air once the level drops."""
+    wells: dict[str, tuple[str, dict[str, float]]] = {}
+    for c in commands:
+        definition = (c.get("result") or {}).get("definition") or {}
+        if c.get("commandType") == "loadLabware" and definition.get("wells"):
+            wells[c["result"]["labwareId"]] = (definition["metadata"]["displayName"],
+                                               {name: w["depth"] for name, w in definition["wells"].items()})
+    fixed: dict[str, float] = {}
+    for c in commands:
+        params = c.get("params") or {}
+        if c.get("commandType") not in ("aspirate", "aspirateWhileTracking"):
+            continue
+        name, depths = wells.get(params.get("labwareId", ""), ("", {}))
+        depth = depths.get(params.get("wellName", ""), 0.0)
+        if depth > DEEP_WELL_MM and (params.get("wellLocation") or {}).get("origin") != "meniscus":
+            fixed.setdefault(f"{params['wellName']} of {name}", depth)
+    return [
+        f"The protocol aspirates from {where} (a {depth:g} mm deep tube) at a fixed height, so the tip goes deep into "
+        "the liquid or, higher up, draws air. Aspirate just below the surface: if the scientist gave the volume in the "
+        "tube, declare it once with tube.load_liquid(liquid, volume_ul) and aspirate at "
+        "tube.meniscus(z=-2, target=\"end\"); if not, pick up a fresh tip, call pipette.measure_liquid_height(tube) "
+        "(the Flex finds the surface coming down from the top) and aspirate at tube.meniscus(z=-2, target=\"end\")."
+        for where, depth in fixed.items()
+    ]
 
 
 def _out_of_tips(tip_racks: list[dict[str, Any]], deck_tips: DeckTips | None) -> str:

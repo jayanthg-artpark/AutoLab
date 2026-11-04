@@ -187,6 +187,41 @@ def test_used_tips_go_in_the_waste_chute():
     assert sim.deck.slots["D3"].waste_chute and "A3" not in sim.deck.slots
 
 
+FALCON = '''requirements = {"robotType": "Flex", "apiLevel": "%s"}
+def run(protocol):
+    protocol.load_waste_chute()
+    tips = protocol.load_labware("opentrons_flex_96_tiprack_50ul", "B2")
+    rack = protocol.load_labware("opentrons_6_tuberack_falcon_50ml_conical", "C2")
+    plate = protocol.load_labware("nest_96_wellplate_200ul_flat", "D1")
+    pipette = protocol.load_instrument("flex_1channel_1000", "left", tip_racks=[tips])
+    tube = rack["A1"]
+    pipette.pick_up_tip()
+SOURCE
+    pipette.dispense(30, plate["A1"])
+    pipette.drop_tip()
+''' % LATEST
+
+
+def falcon(source: str):
+    return asyncio.run(simulate(FALCON.replace("SOURCE", source), "D1"))
+
+
+def test_tubes_are_aspirated_from_just_below_the_surface():
+    for fixed in ("    pipette.aspirate(30, tube)", "    pipette.aspirate(30, tube.bottom(40))",
+                  "    pipette.transfer(30, tube, plate['A2'], new_tip='never')"):
+        sim = falcon(fixed)
+        assert not sim.ok
+        assert any(e.startswith("The protocol aspirates from A1 of Opentrons 6 Tube Rack with Falcon 50 mL Conical "
+                                "(a 113 mm deep tube) at a fixed height") for e in sim.errors), (fixed, sim.errors)
+
+    known = falcon('    tube.load_liquid(protocol.define_liquid("Buffer"), 40000)\n'
+                   '    pipette.aspirate(30, tube.meniscus(z=-2, target="end"))')
+    sensed = falcon('    pipette.measure_liquid_height(tube)\n    pipette.aspirate(30, tube.meniscus(z=-2, target="end"))')
+    assert known.ok and sensed.ok, (known.errors, sensed.errors)
+    assert not falcon('    pipette.aspirate(30, tube.meniscus(z=-2, target="end"))').ok  # no volume, no measurement
+    assert "measure_liquid_height" in DeckRules().describe()
+
+
 def test_a_deck_without_a_waste_chute_keeps_the_trash_bin():
     rules = DeckRules(waste_chute_slot="")
     assert 'load it with `protocol.load_trash_bin("A3")`' in rules.describe()

@@ -241,10 +241,76 @@ LABWARE_CATEGORIES = {
 LIQUID_HEIGHT_NOTE = (
     "Liquid height: the robot knows the well's shape, not how full it is. Unless told otherwise it aspirates "
     "1 mm above the bottom, so in a deep tube or reservoir the tip, and even the pipette, goes deep into the liquid. "
-    "Aspirate a few mm below the surface instead: give the well its starting volume with "
-    "well.load_liquid(liquid, volume_ul) and aspirate at well.meniscus(z=-3) (without load_liquid the simulation "
-    "fails), or have the Flex sense it with pipette.measure_liquid_height(well)."
+    "Aspirate just below the surface instead: with the volume known, declare it with well.load_liquid(liquid, "
+    "volume_ul) and aspirate at well.meniscus(z=-2, target=\"end\"); with it unknown, pick up a fresh tip, call "
+    "pipette.measure_liquid_height(well) and aspirate at the same place. In 15 and 50 mL tubes this is required: "
+    "see reference/opentrons-labware/liquid-height.md."
 )
+LIQUID_HEIGHT_PAGE = """\
+# Aspirating at the liquid surface: tubes, reservoirs and deep wells
+
+How this lab aspirates from tubes, and how Opentrons handles liquid height (Python API 2.21 and later, Flex).
+
+## What the robot does by default
+
+The robot knows each well's shape from its labware definition, not how much liquid is in it. aspirate(volume, well)
+goes to 1 mm above the bottom of the well (pipette.well_bottom_clearance.aspirate changes the 1 mm). In a 15 or
+50 mL conical tube that is about 110 mm under the rim: the tip, and in a full tube the pipette itself, goes deep
+into the liquid, liquid coats the outside of the tip, and volumes are less accurate. A fixed height higher up, such as
+well.bottom(40) or well.top(-5), only works for one fill level: once the level drops below it, the pipette draws air.
+
+## The lab's rule
+
+From 15 and 50 mL tubes (wells deeper than 60 mm), always aspirate just below the liquid surface (the meniscus).
+The simulation check fails any other aspirate from them. Shallower wells (plates, 1.5 and 2 mL tubes, reservoirs)
+may use the default, but the same methods work there too.
+
+## Volume in the tube known
+
+Declare the starting volume once, then aspirate relative to the meniscus. The robot works out the surface from the
+tube's shape and lowers it as it takes liquid, so every aspirate stays just below the surface:
+
+```python
+buffer = protocol.define_liquid("Buffer", display_color="#4a90d9")
+tube = rack["A1"]
+tube.load_liquid(buffer, 40000)  # 40 mL, in µL
+for well in plate.wells()[:8]:
+    pipette.pick_up_tip()
+    pipette.aspirate(30, tube.meniscus(z=-2, target="end"))  # 2 mm below where the surface ends up
+    pipette.dispense(30, well)
+    pipette.drop_tip()
+```
+
+target="end" aims at where the surface will be after this aspirate, so the tip is still in liquid at the end;
+target="start" aims at the surface before it. Without load_liquid (or a measurement) the simulation fails with
+LiquidHeightUnknownError, so a missing volume is caught before the run.
+
+## Volume not known
+
+Let the Flex find the surface: measure_liquid_height() lowers a fresh tip from the top of the tube until its pressure
+sensor touches liquid, records the height, and the protocol aspirates from there. Pick up a new tip right before
+each measurement (a wet tip reads wrongly); the tip used to measure can then aspirate.
+
+```python
+pipette.pick_up_tip()
+pipette.measure_liquid_height(tube)  # Flex 1-, 8- (A1 and H1 channels) and 96-channel pipettes
+pipette.aspirate(30, tube.meniscus(z=-2, target="end"))
+pipette.dispense(30, plate["A1"])
+pipette.drop_tip()
+```
+
+After one measurement the robot keeps tracking the level for later aspirates from the same tube. If the tube is
+empty the Flex stops and asks for liquid (error recovery). In the simulation the measurement always succeeds.
+
+## Notes
+
+- transfer(), distribute() and consolidate() accept the same location: pipette.transfer(30, tube.meniscus(z=-2,
+  target="end"), plate["A1"]).
+- Use z=-2 to z=-5: deep enough to stay in liquid while aspirating, shallow enough to keep the outside of the tip dry.
+- pipette.liquid_presence_detection = True only checks that there is liquid before each aspirate; it does not move the
+  aspirate height. Use measure_liquid_height() for that.
+- Dispense into an empty plate as usual (1 mm above the bottom, or well.top(-1) for drops from above).
+"""
 
 
 def _volume(ul: float) -> str:
@@ -328,6 +394,9 @@ def import_opentrons_labware(root: Path, *, progress: Callable[[str], None] = pr
     _write(root, f"{LABWARE_DIR}/index.md", "\n".join(lines))
     sources.add(f"{LABWARE_DIR}/index.md", source="Opentrons labware library", url="https://labware.opentrons.com/",
                 license=DOCS_LICENSE)
+    _write(root, f"{LABWARE_DIR}/liquid-height.md", LIQUID_HEIGHT_PAGE)
+    sources.add(f"{LABWARE_DIR}/liquid-height.md", source="This lab, from the Opentrons Python API docs",
+                url="https://docs.opentrons.com/python-api/building-block-commands/liquids/", license=DOCS_LICENSE)
     sources.save()
     count = sum(len(entries) for entries in index.values())
     progress(f"Imported {count} labware definitions into {folder}")

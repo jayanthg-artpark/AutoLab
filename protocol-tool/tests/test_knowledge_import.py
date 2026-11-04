@@ -79,7 +79,8 @@ def test_opentrons_labware(tmp_path):
     rack = (folder / "opentrons_10_tuberack_falcon_4x50ml_6x15ml_conical.md").read_text(encoding="utf-8")
     assert 'protocol.load_labware("opentrons_10_tuberack_falcon_4x50ml_6x15ml_conical"' in rack
     assert "4 x Falcon 4x50 mL Conical in A3, B3, A4, B4: holds 50 mL" in rack
-    assert "well.meniscus(z=-3)" in rack  # deep tubes say how to aspirate below the surface
+    assert 'well.meniscus(z=-2, target="end")' in rack  # deep tubes say how to aspirate below the surface
+    assert "measure_liquid_height" in (folder / "liquid-height.md").read_text(encoding="utf-8")
     tips = (folder / "opentrons_flex_96_tiprack_50ul.md").read_text(encoding="utf-8")
     assert "Tip length: 57.9 mm" in tips and "meniscus" not in tips
     assert not (folder / "opentrons_96_tiprack_300ul.md").exists()  # OT-2 tips don't fit Flex pipettes
