@@ -402,6 +402,20 @@ def _tip_use(
             # An 8-channel takes the whole column from its row-A well; a 96-channel the whole rack.
             taken = {1: 1, 8: 8}.get(use["channels"], RACK_SIZE)
             rack["after"] = max(rack["after"], TIP_ORDER.index(well) + taken)
+            if TIP_ORDER.index(well) < rack["before"]:
+                # The run starts each pipette at its first rack's next unused tip, but the Flex goes on
+                # into its later racks from A1: tips that earlier protocols or runs already took.
+                rack["reused"] = True
+    for slot, rack in racks.items():
+        if rack.pop("reused", False):
+            gone = "empty" if rack["before"] >= RACK_SIZE else f"partly used ({RACK_SIZE - rack['before']} of {RACK_SIZE} left)"
+            problems.add(
+                f"Not enough tips on the deck: the {rack['pipette']} runs on into {slot}, but by then that rack is {gone} "
+                f"(the protocols before this one in the workflow, or runs queued ahead, take those tips), and the Flex "
+                f"would start it from A1 again. Load another {rack['load_name']} rack in a free slot and add it to "
+                "tip_racks=[...] (lab staff put a full rack there), or use fewer tips (for example reuse a tip for "
+                "the same reagent)."
+            )
     if deck_tips:
         for slot, rack in racks.items():
             recorded = deck_tips.load_names.get(slot)
