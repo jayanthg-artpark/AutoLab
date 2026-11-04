@@ -58,6 +58,11 @@ export function renderDeck(protocol, count = 1) {
       ),
     );
   }
+  const allLabware = Object.values(deck.slots).flatMap((c) => c.labware ?? []);
+  if (allLabware.some((l) => Object.keys(l.dispensed ?? {}).length || Object.keys(l.aspirated ?? {}).length)) {
+    meta.push(h("div", { class: "deck-key" },
+      "Solid wells hold liquid at the start, shaded wells receive it during the protocol, and outlined wells are pipetted from. Hover a slot for volumes."));
+  }
   if (deck.off_deck.length) {
     meta.push(h("div", {}, h("strong", {}, "Off deck "), deck.off_deck.map((l) => l.display_name).join(", ")));
   }
@@ -133,7 +138,23 @@ function liquidSummary(labware, liquids) {
   if (!labware) return [];
   const counts = {};
   for (const ids of Object.values(labware.liquids)) for (const id of ids) counts[id] = (counts[id] ?? 0) + 1;
-  return Object.entries(counts).map(([id, n]) => h("div", {}, `${liquids[id]?.name ?? "Liquid"}: ${n} well${n === 1 ? "" : "s"}`));
+  const lines = Object.entries(counts).map(([id, n]) => h("div", {}, `${liquids[id]?.name ?? "Liquid"}: ${n} well${n === 1 ? "" : "s"}`));
+  const added = Object.values(labware.dispensed ?? {});
+  if (added.length) {
+    const low = Math.min(...added), high = Math.max(...added);
+    const each = low === high ? `${ul(low)} each` : `${ul(low)}–${ul(high)}`;
+    lines.push(h("div", {}, `Liquid added to ${added.length} well${added.length === 1 ? "" : "s"} (${each})`));
+  }
+  const taken = Object.values(labware.aspirated ?? {});
+  if (taken.length) {
+    const total = taken.reduce((a, b) => a + b, 0);
+    lines.push(h("div", {}, `Liquid taken from ${taken.length} well${taken.length === 1 ? "" : "s"} (${ul(total)} in all)`));
+  }
+  return lines;
+}
+
+function ul(volume) {
+  return volume >= 1000 ? `${+(volume / 1000).toFixed(2)} mL` : `${+volume.toFixed(1)} µL`;
 }
 
 // A small drawing of the labware: its wells, coloured by the liquid loaded into them.
@@ -149,9 +170,22 @@ function labwareSvg(labware, liquids) {
   const tipRack = labware.category === "tipRack";
   for (let r = 0; r < rows; r++) {
     for (let c = 0; c < cols; c++) {
-      const liquidId = labware.liquids[`${rowLabel(r)}${c + 1}`]?.[0];
-      const fill = liquidId ? liquids[liquidId]?.color ?? "var(--accent)" : tipRack ? "var(--tip)" : "none";
-      const attrs = { fill, stroke: liquidId ? fill : "var(--well-stroke)", "stroke-width": 0.8 };
+      const well = `${rowLabel(r)}${c + 1}`;
+      const liquidId = labware.liquids[well]?.[0];
+      const received = labware.received?.[well];
+      let attrs;
+      if (liquidId) {
+        const fill = liquids[liquidId]?.color ?? "var(--accent)";
+        attrs = { fill, stroke: fill, "stroke-width": 0.8 };
+      } else if (received) {
+        // Filled during the run: the colour of the liquid it receives, or the accent when undeclared.
+        const color = liquids[received[0]]?.color ?? "var(--accent)";
+        attrs = { fill: color, "fill-opacity": 0.45, stroke: color, "stroke-width": 1.2 };
+      } else if (labware.aspirated?.[well]) {
+        attrs = { fill: "none", stroke: "var(--accent)", "stroke-width": 1.4 };
+      } else {
+        attrs = { fill: tipRack ? "var(--tip)" : "none", stroke: "var(--well-stroke)", "stroke-width": 0.8 };
+      }
       if (rows === 1) {
         svg.append(s("rect", { x: padX + c * cw + cw * 0.1, y: padY, width: cw * 0.8, height: H - 2 * padY, rx: 2, ...attrs }));
       } else {

@@ -222,6 +222,24 @@ def test_tubes_are_aspirated_from_just_below_the_surface():
     assert "measure_liquid_height" in DeckRules().describe()
 
 
+def test_the_deck_shows_where_liquid_goes():
+    sim = falcon('    tube.load_liquid(protocol.define_liquid("Buffer"), 40000)\n'
+                 '    pipette.aspirate(30, tube.meniscus(z=-2, target="end"))')
+    rack, plate = sim.deck.slots["C2"].labware[-1], sim.deck.plate_at("D1")
+    buffer = sim.deck.liquids[0].id
+    assert rack.aspirated == {"A1": 30} and plate.dispensed == {"A1": 30}
+    assert plate.received == {"A1": [buffer]}  # the tip carries the tube's liquid into the plate
+
+    multi = GOOD_PROTOCOL.replace('"flex_1channel_1000", "left"', '"flex_8channel_50", "right"') \
+                         .replace("opentrons_flex_96_tiprack_200ul", "opentrons_flex_96_tiprack_50ul")
+    multi = multi[:multi.index("    volume = protocol.params.volume_ul")] + \
+        '    pipette.transfer(20, reservoir["A1"], plate["A2"])\n'
+    sim = asyncio.run(simulate(multi, "D2"))
+    assert sim.ok, sim.errors
+    assert sorted(sim.deck.plate_at("D2").dispensed) == [f"{r}2" for r in "ABCDEFGH"]  # one column, 8 channels
+    assert sim.deck.slots["C2"].labware[-1].aspirated == {"A1": 160}  # all 8 channels take from the one trough
+
+
 def test_a_deck_without_a_waste_chute_keeps_the_trash_bin():
     rules = DeckRules(waste_chute_slot="")
     assert 'load it with `protocol.load_trash_bin("A3")`' in rules.describe()

@@ -134,6 +134,11 @@ class Labware(BaseModel):
     cols: int = 0
     # Well -> liquid ids, for wells the protocol fills with load_liquid().
     liquids: dict[str, list[str]] = Field(default_factory=dict)
+    # Well -> µL the protocol dispenses into it / takes from it over the run, and the liquids that
+    # arrive there (ids from load_liquid; empty when the source liquid wasn't declared).
+    dispensed: dict[str, float] = Field(default_factory=dict)
+    aspirated: dict[str, float] = Field(default_factory=dict)
+    received: dict[str, list[str]] = Field(default_factory=dict)
 
 
 class Module(BaseModel):

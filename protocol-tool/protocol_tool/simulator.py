@@ -48,6 +48,9 @@ FLEX_ROBOT = "OT-3 Standard"  # how the analysis names the Flex
 # Wells deeper than this (15 and 50 mL conical tubes) must be aspirated from relative to the
 # liquid surface; the next deepest Opentrons labware (2 mL tubes, deep-well plates) is 45 mm.
 DEEP_WELL_MM = 60
+# Bump when the checks or what a simulation reports change, so stored designs are simulated again
+# before they are sent. 2: aspirating from tubes at the liquid surface, and where liquid goes.
+CHECKS_VERSION = 2
 
 # Pipette load names (what protocols write) -> the names the analysis and the robot report.
 PIPETTE_INTERNAL = {
@@ -118,7 +121,7 @@ class DeckRules:
         """Identifies the rules a simulation was checked against; a change means re-checking."""
         return "|".join([",".join(self.thor_slots), self.trash_slot, self.waste_chute_slot, self.api_level,
                          ",".join(self.labware), ",".join(self.blocked_slots),
-                         ",".join(f"{m}={p}" for m, p in self.pipettes), str(self.gripper)])
+                         ",".join(f"{m}={p}" for m, p in self.pipettes), str(self.gripper), f"checks{CHECKS_VERSION}"])
 
     def describe(self) -> str:
         """The deck rules as the AI model reads them in its instructions."""
@@ -567,6 +570,8 @@ def _build_deck(analysis: dict[str, Any], commands: list[dict[str, Any]], code: 
     if re.search(r"load_waste_chute\(", code):
         slot("D3").waste_chute = True
 
+    _track_liquids(analysis, commands, labware)
+
     pipettes = [
         Pipette(mount=p.get("mount", ""), name=p.get("pipetteName", ""), display_name=_pipette_name(p.get("pipetteName", "")))
         for p in analysis.get("pipettes", [])
@@ -580,6 +585,55 @@ def _build_deck(analysis: dict[str, Any], commands: list[dict[str, Any]], code: 
         slots=dict(sorted(slots.items())), off_deck=off_deck,
         pipettes=sorted(pipettes, key=lambda p: p.mount), liquids=liquids,
     )
+
+
+ASPIRATES = ("aspirate", "aspirateInPlace", "aspirateWhileTracking")
+DISPENSES = ("dispense", "dispenseInPlace", "dispenseWhileTracking")
+
+
+def _track_liquids(analysis: dict[str, Any], commands: list[dict[str, Any]], labware: dict[str, Labware]) -> None:
+    """Which wells the pipettes take liquid from and put it into, and which liquids end up where:
+    a tip carries what it aspirated until it is dropped."""
+    channels = {p["id"]: _channels(p.get("pipetteName", "")) for p in analysis.get("pipettes", [])}
+    at: dict[str, tuple[str, str]] = {}  # pipette -> (labware, well) it is in
+    carrying: dict[str, list[str]] = {}
+    for cmd in commands:
+        kind, params = cmd.get("commandType"), cmd.get("params") or {}
+        pipette = params.get("pipetteId", "")
+        if kind in ("pickUpTip", "dropTip", "dropTipInPlace"):
+            carrying[pipette] = []
+        if params.get("labwareId") in labware and params.get("wellName"):
+            at[pipette] = (params["labwareId"], params["wellName"])
+        elif kind in ("moveToAddressableArea", "moveToAddressableAreaForDropTip", "moveToCoordinates"):
+            at.pop(pipette, None)
+        if (kind not in ASPIRATES and kind not in DISPENSES) or pipette not in at:
+            continue
+        lw = labware[at[pipette][0]]
+        reached = _wells_reached(lw, at[pipette][1], channels.get(pipette, 1))
+        # µL per channel; channels sharing one well (a reservoir trough) all take from it.
+        volume = float(params.get("volume") or 0) * (channels.get(pipette, 1) if len(reached) == 1 else 1)
+        for well in reached:
+            if kind in ASPIRATES:
+                lw.aspirated[well] = lw.aspirated.get(well, 0) + volume
+                held = carrying.setdefault(pipette, [])
+                held += [i for i in lw.liquids.get(well, []) + lw.received.get(well, []) if i not in held]
+            else:
+                lw.dispensed[well] = lw.dispensed.get(well, 0) + volume
+                got = lw.received.setdefault(well, [])
+                got += [i for i in carrying.get(pipette, []) if i not in got]
+
+
+def _wells_reached(lw: Labware, well: str, channels: int) -> list[str]:
+    """The wells a pipette's channels are in when its first channel is at `well`: an 8-channel
+    covers a column of a 96-well plate (every other row of a 384), a 96-channel the whole plate;
+    in a reservoir or tube rack with fewer rows, the channels share the one well."""
+    match = re.fullmatch(r"([A-P])(\d+)", well)
+    if channels == 1 or not match or lw.rows < 8:
+        return [well]
+    if channels == 96 and lw.rows == 8 and lw.cols == 12:
+        return [f"{r}{c}" for r in "ABCDEFGH" for c in range(1, 13)]
+    step, start = lw.rows // 8, "ABCDEFGHIJKLMNOP".index(match[1])
+    return [f"{'ABCDEFGHIJKLMNOP'[r]}{match[2]}" for r in range(start, min(lw.rows, start + 8 * step), step)]
 
 
 def _resolve(location: Any, module_slot: dict[str, str], labware_slot: dict[str, str | None]) -> str | None:
