@@ -101,6 +101,12 @@ h3 { font-size: 14px; font-weight: 650; }
 }
 .brand { display: flex; align-items: center; gap: 10px; }
 .brand-icon { width: 26px; height: 26px; color: var(--accent); flex: none; }
+/* The ARTPARK logo is drawn for a light background, so dark mode gives it a light panel. */
+.org-logo { height: 30px; width: auto; flex: none; display: block; }
+.brand-divider { width: 1px; height: 24px; background: var(--hairline); flex: none; margin: 0 4px; }
+@media (prefers-color-scheme: dark) {
+  .org-logo { background: #f6f5f2; padding: 3px 8px; border-radius: 6px; box-sizing: content-box; height: 24px; }
+}
 .tabs { display: flex; gap: 2px; background: var(--surface-2); padding: 3px; border-radius: 9px; }
 .tabs button {
   font: inherit; font-weight: 600; font-size: 13px;
@@ -134,6 +140,7 @@ h3 { font-size: 14px; font-weight: 650; }
   .topbar { height: auto; flex-wrap: wrap; padding: 10px 16px; gap: 10px; }
   .status-group { margin: 0; justify-content: flex-start; width: 100%; }
   .devices { justify-content: flex-start; }
+  .org-logo { height: 24px; }
 }
 
 /* --- Layout --------------------------------------------------------------------- */
