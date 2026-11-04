@@ -139,23 +139,39 @@ OK = sse(delta(content="ok"), delta(finish="stop"))
 def test_busy_or_rate_limited_models_fall_back():
     api = FakeChatAPI(
         (429, b'{"error": {"message": "quota"}}'),  # main model: out of quota -> next model at once
-        (503, OVERLOADED),                          # first fallback: busy -> one retry
+        (503, OVERLOADED),                          # first fallback: busy -> the last model at once, no retry
+        (503, OVERLOADED),                          # last model: busy -> one retry
         (200, OK),
-        (200, OK),                                  # the main model rests: the next request starts with the one that answered
+        (200, OK),                                  # the others rest: the next request starts with the one that answered
     )
     model = OpenAICompatModel(GEMINI, httpx.MockTransport(api))
     assert collect(model)[-1].content == [{"type": "text", "text": "ok"}]
-    assert [r["model"] for r in api.requests] == ["gemini-flash-latest", "gemini-3.5-flash", "gemini-3.5-flash"]
-    assert model.active_model == "gemini-3.5-flash"
+    assert [r["model"] for r in api.requests] == [
+        "gemini-flash-latest", "gemini-3.5-flash", "gemini-flash-lite-latest", "gemini-flash-lite-latest"]
+    assert model.active_model == "gemini-flash-lite-latest"
     collect(model)
-    assert api.requests[-1]["model"] == "gemini-3.5-flash"
+    assert api.requests[-1]["model"] == "gemini-flash-lite-latest"
+
+
+def test_busy_model_rests_for_the_rest_of_the_design(monkeypatch):
+    api = FakeChatAPI((503, OVERLOADED), (200, OK), (200, OK), (200, OK))
+    model = OpenAICompatModel(GEMINI, httpx.MockTransport(api))
+    now = [1000.0]
+    monkeypatch.setattr("protocol_tool.openai_compat.time.time", lambda: now[0])
+    collect(model)
+    now[0] += 5 * 60  # minutes later, still in the same design: the busy model is not tried again
+    collect(model)
+    assert [r["model"] for r in api.requests] == ["gemini-flash-latest", "gemini-3.5-flash", "gemini-3.5-flash"]
+    now[0] += 10 * 60  # its rest is over: requests go back to it
+    collect(model)
+    assert api.requests[-1]["model"] == "gemini-flash-latest"
 
 
 def test_all_models_busy_gives_a_clear_error():
-    api = FakeChatAPI(*[(503, OVERLOADED)] * 6)  # three models, one retry each
+    api = FakeChatAPI(*[(503, OVERLOADED)] * 4)  # three models; only the last is retried
     with pytest.raises(ModelError, match="overloaded right now"):
         collect(OpenAICompatModel(GEMINI, httpx.MockTransport(api)))
-    assert len(api.requests) == 6
+    assert len(api.requests) == 4
 
 
 def test_thought_signatures_only_go_back_to_the_model_that_made_them():

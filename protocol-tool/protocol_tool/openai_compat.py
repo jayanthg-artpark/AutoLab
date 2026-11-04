@@ -33,8 +33,10 @@ MAX_PDF_CHARS = 150_000
 # Longest a request waits out a per-minute limit before giving up on that model.
 RATE_LIMIT_MAX_WAIT_S = 60.0
 RATE_LIMIT_WAITS = 3
-# How long a model isn't tried after it was busy or turned out not to exist.
-REST_OVERLOADED_S = 30.0
+# How long a model isn't tried after it was busy or turned out not to exist. Gemini's
+# "high demand" spells usually last many minutes, and every retry of a busy model costs
+# 10-20 s before it answers 503, so a busy model rests long enough to cover a whole design.
+REST_OVERLOADED_S = 600.0
 REST_NOT_FOUND_S = 3600.0
 _pdf_cache: dict[str, str] = {}
 
@@ -92,7 +94,7 @@ class OpenAICompatModel:
                 body["tools"] = [to_openai_tool(t) for t in tools]
             waited = 0.0
             for attempt in range(RATE_LIMIT_WAITS + 1):
-                chunks = self._post(body)
+                chunks = self._post(body, retry_overloaded=is_last)
                 try:
                     first = await anext(chunks, None)  # sends the request; raises on HTTP errors
                 except RateLimited as exc:
@@ -199,14 +201,15 @@ class OpenAICompatModel:
             stop = "tool_use"
         yield ModelTurn(content=content, stop_reason=stop)
 
-    async def _post(self, body: dict[str, Any]):
-        """Streams parsed chunks. Retries a busy server once; rate limits are left to the caller."""
+    async def _post(self, body: dict[str, Any], retry_overloaded: bool):
+        """Streams parsed chunks. Retries a busy server once if asked (only the last model is:
+        the others hand over to the next model at once); rate limits are left to the caller."""
         p = self._provider
         load_key_file(p.key_env)
         headers = {"Authorization": f"Bearer {os.environ[p.key_env]}"} if p.key_env and os.environ.get(p.key_env) else {}
         if p.key_env and not headers:
             raise ModelAuthError("missing")
-        retries = 1
+        retries = 1 if retry_overloaded else 0
         attempt = 0
         while True:
             try:
