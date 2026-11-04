@@ -71,7 +71,7 @@ inventory = """
 - Modules: none
 - Tip racks: opentrons_flex_96_tiprack_50ul, opentrons_flex_96_tiprack_200ul, opentrons_flex_96_tiprack_1000ul (and the filtertiprack versions)
 - Labware in stock: corning_96_wellplate_360ul_flat, nest_96_wellplate_200ul_flat, nest_12_reservoir_15ml, nest_1_reservoir_195ml, opentrons_24_tuberack_eppendorf_1.5ml_safelock_snapcap, opentrons_15_tuberack_falcon_15ml_conical
-- Fixtures: a trash bin in slot A3 and a waste chute in slot D3
+- Fixtures: a waste chute in slot D3 (used tips go here) and a trash bin in slot A3
 """
 
 [knowledge]

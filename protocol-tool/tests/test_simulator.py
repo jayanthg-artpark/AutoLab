@@ -85,7 +85,8 @@ def test_good_protocol_reports_its_deck():
     sim = asyncio.run(simulate(GOOD_PROTOCOL, "D2"))
 
     assert sim.ok, sim.errors
-    assert sim.warnings == []
+    # Its only shortcoming: it drops tips in the trash bin, not the lab's waste chute.
+    assert [w.split(";")[0] for w in sim.warnings] == ["Tips are dropped in the trash bin in A3"]
     slots = sim.deck.slots
     assert slots["A3"].trash
     assert slots["C1"].labware[0].category == "tipRack"
@@ -159,3 +160,25 @@ def test_a_tip_rack_shared_by_two_pipettes_fails():
     sim = asyncio.run(simulate(code, "D2"))
     assert not sim.ok
     assert any("used by two pipettes" in e for e in sim.errors)
+
+
+def test_used_tips_go_in_the_waste_chute():
+    rules = DeckRules()
+    assert "Used tips go in the waste chute (D3, fixed)" in rules.describe()
+    assert "load_waste_chute()" in rules.describe()
+
+    binned = asyncio.run(simulate(GOOD_PROTOCOL, "D2", rules=rules))  # its tips go to the trash bin in A3
+    assert any("Tips are dropped in the trash bin in A3; this lab drops tips in the waste chute (D3)" in w
+               for w in binned.warnings)
+
+    chute = GOOD_PROTOCOL.replace('protocol.load_trash_bin("A3")', "protocol.load_waste_chute()")
+    sim = asyncio.run(simulate(chute, "D2", rules=rules))
+    assert sim.ok, sim.errors
+    assert not any("trash bin" in w for w in sim.warnings)
+    assert sim.deck.slots["D3"].waste_chute and "A3" not in sim.deck.slots
+
+
+def test_a_deck_without_a_waste_chute_keeps_the_trash_bin():
+    rules = DeckRules(waste_chute_slot="")
+    assert 'load it with `protocol.load_trash_bin("A3")`' in rules.describe()
+    assert not any("waste chute" in w for w in asyncio.run(simulate(GOOD_PROTOCOL, "D2", rules=rules)).warnings)

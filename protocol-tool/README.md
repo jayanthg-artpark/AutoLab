@@ -257,8 +257,9 @@ Copy `config.example.toml` to `config.toml`. The settings that matter most:
   deck rules. Thor can place the sample plate in B1–B3, C1–C3, D1 and D2.
   **A1 and A2 stay empty** (`blocked_slots`): no labware, tip racks, reservoirs,
   modules or fixtures, no gripper moves into them, and no Thermocycler (it
-  covers A1); the deck view shows them as "Kept empty". A3 holds the trash bin,
-  and D3 holds the waste chute. The assistant picks one
+  covers A1); the deck view shows them as "Kept empty". A3 holds the trash bin
+  and D3 the waste chute, where protocols drop used tips (the simulation warns
+  when tips go to the trash bin instead). The assistant picks one
   of Thor's slots for each protocol, and the simulation fails if a protocol
   breaks these rules. Keep `thor_slots` the same as the Flex's `plate_slots` in
   the master node's `instruments.toml`.

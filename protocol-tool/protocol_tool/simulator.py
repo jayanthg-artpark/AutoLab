@@ -120,9 +120,16 @@ class DeckRules:
     def describe(self) -> str:
         """The deck rules as the AI model reads them in its instructions."""
         lines = [f"- Thor can place the sample plate only in {', '.join(self.thor_slots)}; it cannot reach the other slots."]
-        lines.append(f'- {self.trash_slot} holds the trash bin (fixed): load it with `protocol.load_trash_bin("{self.trash_slot}")`.')
         if self.waste_chute_slot:
-            lines.append(f"- {self.waste_chute_slot} holds the waste chute (fixed): use `protocol.load_waste_chute()` if you need it.")
+            lines.append(
+                f"- Used tips go in the waste chute ({self.waste_chute_slot}, fixed): load it with "
+                "`waste_chute = protocol.load_waste_chute()` and don't load the trash bin, so `drop_tip()` puts tips "
+                f"there. Only if the scientist asks for the trash bin: `protocol.load_trash_bin(\"{self.trash_slot}\")` "
+                f"({self.trash_slot}, fixed). Pipettes drop tips in whichever of the two is loaded first, so if a protocol "
+                "loads both, load the waste chute first or set `pipette.trash_container = waste_chute`."
+            )
+        else:
+            lines.append(f'- {self.trash_slot} holds the trash bin (fixed): load it with `protocol.load_trash_bin("{self.trash_slot}")`.')
         fixtures = " or ".join(s for s in (self.trash_slot, self.waste_chute_slot) if s)
         lines.append(f"- Never put labware or modules in {fixtures}.")
         if self.blocked_slots:
@@ -327,6 +334,14 @@ def parse_analysis(
     plate = deck.plate_at(plate_slot) if plate_slot else None
     if plate is not None and plate.category not in ("wellPlate", ""):
         warnings.append(f"Slot {plate_slot} holds {plate.display_name}, not a well plate.")
+    binned = sorted({m[1] for c in commands if c.get("commandType") == "moveToAddressableAreaForDropTip"
+                     and (m := re.fullmatch(r"movableTrash([A-D][1-3])", (c.get("params") or {}).get("addressableAreaName", "")))})
+    if rules.waste_chute_slot and binned:
+        warnings.append(
+            f"Tips are dropped in the trash bin in {', '.join(binned)}; this lab drops tips in the waste chute "
+            f"({rules.waste_chute_slot}). Load the waste chute (protocol.load_waste_chute()) instead of the trash bin, "
+            "unless the scientist asked for the trash bin."
+        )
     if any(c.get("commandType") == "waitForResume" for c in commands):
         warnings.append("The protocol pauses for a person to resume it; runs here are unattended.")
 
@@ -495,7 +510,7 @@ def _build_deck(analysis: dict[str, Any], commands: list[dict[str, Any]], code: 
             area = params.get("addressableAreaName", "")
             if match := re.fullmatch(r"movableTrash([A-D][1-3])", area):
                 slot(match[1]).trash = True
-            elif area.startswith("wasteChute"):
+            elif "WasteChute" in area:  # 1ChannelWasteChute, 8ChannelWasteChute, ...
                 slot("D3").waste_chute = True
 
     # Trash that the protocol loads but never uses still occupies its slot.
