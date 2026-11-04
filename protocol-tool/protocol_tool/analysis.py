@@ -317,6 +317,29 @@ def analyse_run(specs: list[dict[str, Any]], results: dict[str, Any] | None) -> 
     return out
 
 
+def describe_results(analyses: list[dict[str, Any]], header: str = "") -> list[str]:
+    """The computed results as text lines: each fit, sample, group and quality note."""
+    lines = []
+    for a in analyses:
+        if a.get("error"):
+            lines.append(f"Analysis '{a['title']}': could not be computed: {a['error']}")
+            continue
+        lines.append(f"Analysis '{a['title']}' ({a['kind']}{header}):")
+        for s in a["series"]:
+            if s.get("fit"):
+                lines.append(f"- {s['name']}: {s['fit']['equation']}, R² {s['fit']['r2']}"
+                             + (f", EC50 {s['fit']['ec50']}" if s['fit'].get('ec50') is not None else "")
+                             + (f", efficiency {s['fit']['efficiency_percent']}%" if s['fit'].get('efficiency_percent') is not None else ""))
+        for r in a["samples"]:
+            lines.append(f"- sample {r['name']}: {r['value']} {a['x_label']} (CV {r['cv']}%)" + (f" [{r['flag']}]" if r["flag"] else ""))
+        for g in a["groups"]:
+            lines.append(f"- group {g['name']}: mean {g['mean']} ± {g['sd']} (n={g['n']})"
+                         + (f", fold change {g['fold_change']}, p={g['p_value']}" if g["fold_change"] is not None else ""))
+        for w in a["warnings"]:
+            lines.append(f"- note: {w}")
+    return lines
+
+
 def analysis_csv(run_id: str, analyses: list[dict[str, Any]]) -> str:
     """The results as rows a spreadsheet can take."""
     import csv

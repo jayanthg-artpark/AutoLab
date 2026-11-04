@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import base64
 import copy
 import json
+import re
 from pathlib import Path
 from typing import Any
 
@@ -10,9 +12,13 @@ import pytest
 
 from protocol_tool.assistant import ModelTurn
 from protocol_tool.config import Settings
+from protocol_tool.simulator import latest_api_level
 
 FIXTURES = Path(__file__).parent / "fixtures"
-GOOD_PROTOCOL = (FIXTURES / "dilution_series.py").read_text(encoding="utf-8")
+# The newest API level the installed opentrons supports: the lab always runs the newest software.
+LATEST = latest_api_level()
+GOOD_PROTOCOL = re.sub(r'"apiLevel": "[\d.]+"', f'"apiLevel": "{LATEST}"',
+                       (FIXTURES / "dilution_series.py").read_text(encoding="utf-8"))
 BROKEN_PROTOCOL = GOOD_PROTOCOL.replace('"nest_12_reservoir_15ml"', '"no_such_reservoir"')
 
 
@@ -74,12 +80,37 @@ FINISHED_RUN = {
 }
 
 
+def _master_tip_wrapper() -> str:
+    """The lines the real master node adds to a protocol to continue partly used tip racks
+    (master-node/master_node/tips.py), so the fake prepares protocols exactly as it does."""
+    import ast
+
+    source = (Path(__file__).resolve().parents[2] / "master-node" / "master_node" / "tips.py").read_text(encoding="utf-8")
+    assign = next(n for n in ast.parse(source).body
+                  if isinstance(n, ast.Assign) and getattr(n.targets[0], "id", "") == "_WRAPPER")
+    return ast.literal_eval(assign.value)
+
+
+MASTER_TIP_WRAPPER = _master_tip_wrapper()
+
+
+def continue_tips(code: str, used: dict[str, int]) -> str:
+    """What the master node's POST /tips/continue does to a protocol (see tips.with_tip_state)."""
+    renamed = re.sub(r"^def run\(", "def _lab_original_run(", code, count=1, flags=re.MULTILINE)
+    return renamed.rstrip() + "\n" + MASTER_TIP_WRAPPER.replace("__USED__", repr(dict(sorted(used.items()))))
+
+
 class FakeMaster:
     """httpx transport standing in for the master node. Plans steps onto flex/tecan; only absorbance reads."""
 
     def __init__(self):
         self.submitted: list[dict[str, Any]] = []
         self.planned: list[dict[str, Any]] = []
+        # Tips used per rack slot that POST /tips/continue reports (racks the runs ahead leave), and the
+        # rack types it says are recorded there. Empty: every rack starts full.
+        self.tips_used: dict[str, int] = {}
+        self.tip_load_names: dict[str, str] = {}
+        self.continued: list[dict[str, Any]] = []
 
     @staticmethod
     def plan(body: dict[str, Any]) -> httpx.Response:
@@ -121,6 +152,16 @@ class FakeMaster:
         if path == "/tips":
             return httpx.Response(200, json={"racks": [{"slot": "C1", "load_name": "opentrons_flex_96_tiprack_200ul",
                                                         "used": 40, "remaining": 56, "next_tip": "A6"}]})
+        if request.method == "POST" and path == "/tips/continue":
+            body = json.loads(request.content)
+            self.continued.append(body)
+            code = base64.b64decode(body["protocol_b64"]).decode()
+            racks = [{"slot": slot, "load_name": name, "used": self.tips_used.get(slot, 0)}
+                     for slot, name in self.tip_load_names.items()]
+            return httpx.Response(200, json={
+                "protocol_b64": base64.b64encode(continue_tips(code, self.tips_used).encode()).decode(),
+                "used": self.tips_used, "racks": racks, "runs_ahead": 0,
+            })
         if path == "/runs/run-1/results.csv":
             return httpx.Response(200, text="well,value\nA1,0.5\n", headers={"content-type": "text/csv", "content-disposition": 'attachment; filename="run-1.csv"'})
         return httpx.Response(404, json={"detail": "not found"})

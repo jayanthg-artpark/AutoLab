@@ -2,7 +2,8 @@
 name = "protocol-tool"
 version = "0.2.0"
 description = "Design lab experiments with Claude, simulate them on an Opentrons Flex, and send them to the master node."
-requires-python = ">=3.11"
+# The newest opentrons needs 3.12 or newer, and its numpy < 2 has no build for 3.13.
+requires-python = ">=3.12,<3.13"
 dependencies = [
   "anthropic>=1.11",
   "fastapi>=0.110",
@@ -15,10 +16,10 @@ dependencies = [
   # Curve fitting for result analysis (standard curves, 4PL/5PL, qPCR efficiency).
   "numpy>=1.24",
   "scipy>=1.11",
-  # The Opentrons simulator, pinned to the lab Flex's robot software version (9.1.2, API up to
-  # 2.29) so protocols are checked exactly as the robot will. Update both together.
+  # The Opentrons simulator. The lab always runs the newest Opentrons software, on the Flex and
+  # here: run-protocol-tool.cmd upgrades this package every time it starts.
   # Can live in a separate environment instead; see [simulator] python.
-  "opentrons==9.1.2",
+  "opentrons>=10.1",
 ]
 
 [project.optional-dependencies]

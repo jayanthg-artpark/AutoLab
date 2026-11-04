@@ -121,3 +121,32 @@ def test_two_protocols_in_one_run_share_the_racks(app_with):
         run = wait_for_status(client, client.post("/runs", json=two).json()["id"], {"succeeded", "failed"})
         assert run["status"] == "failed" and "Not enough tips" in run["error"]
         assert len(flex.sources) == 2
+
+
+def test_continue_prepares_a_protocol_after_the_runs_ahead(app_with):
+    import base64
+
+    from .conftest import PROTOCOL
+
+    body = {"protocol_b64": base64.b64encode(PROTOCOL).decode()}
+    with app_with() as client:
+        fresh = client.post("/tips/continue", json=body).json()
+        assert fresh["racks"] == [] and fresh["used"] == {} and fresh["runs_ahead"] == 0
+        assert "_LAB_TIPS_USED = {}" in base64.b64decode(fresh["protocol_b64"]).decode()
+
+        # A run holding the plate before its protocol, and one queued behind it: 2 x 40 tips ahead.
+        hold_first = make_workflow({"type": "hold", "seconds": 3600}, liquid_step(tips=TIP_USE_40))
+        running = client.post("/runs", json=hold_first).json()["id"]
+        queued = client.post("/runs", json=make_workflow(liquid_step(tips=TIP_USE_40))).json()["id"]
+        wait_for_status(client, running, {"running"})
+        ahead = client.post("/tips/continue", json=body).json()
+        assert ahead["runs_ahead"] == 2 and ahead["used"] == {"C1": 80}
+        assert "_LAB_TIPS_USED = {'C1': 80}" in base64.b64decode(ahead["protocol_b64"]).decode()
+        assert client.get("/tips").json()["racks"] == []  # nothing is recorded as used yet
+        for run_id in (queued, running):
+            client.post(f"/runs/{run_id}/abort")
+
+        # The protocols before this one in the same run count too.
+        same_run = client.post("/tips/continue", json={**body, "after": [TIP_USE_40]}).json()
+        assert same_run["used"] == {"C1": 40}
+        assert client.post("/tips/continue", json={"protocol_b64": "bm90IGEgcHJvdG9jb2w="}).status_code == 422

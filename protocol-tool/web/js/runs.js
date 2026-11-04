@@ -35,6 +35,8 @@ export function createRuns({ explainEnabled = () => false, onOpenDesign = () => 
   let results = null;
   let note = null; // { runId, text } once the AI summary is loaded
   let analysis = null; // { runId, analyses } once computed
+  let feedback = null; // { runId, enabled, saved } once loaded; saved is the stored rating or null
+  let feedbackDraft = null; // { runId, rating, notes } as the scientist edits them
   let measurementIndex = 0;
   let showTable = false;
 
@@ -126,6 +128,7 @@ export function createRuns({ explainEnabled = () => false, onOpenDesign = () => 
       results = null;
       note = null;
       analysis = null;
+      feedback = feedbackDraft = null;
       measurementIndex = 0;
     }
     renderList();
@@ -173,6 +176,16 @@ export function createRuns({ explainEnabled = () => false, onOpenDesign = () => 
         // Retry on the next refresh.
       }
     }
+    if (FINISHED.has(selected.status) && feedback?.runId !== selected.id) {
+      try {
+        const loaded = await api(`/api/runs/${encodeURIComponent(selected.id)}/feedback`);
+        feedback = { runId: selected.id, enabled: loaded.enabled, saved: loaded.feedback };
+        feedbackDraft = { runId: selected.id, rating: loaded.feedback?.rating ?? "", notes: loaded.feedback?.notes ?? "" };
+        $("feedback-notes").value = feedbackDraft.notes;
+      } catch {
+        // Retry on the next refresh.
+      }
+    }
     renderRun();
   }
 
@@ -203,6 +216,7 @@ export function createRuns({ explainEnabled = () => false, onOpenDesign = () => 
     renderAnalyses();
     renderResults();
     renderExplain();
+    renderFeedback();
   }
 
   // --- Analysis: curves, interpolated samples, comparisons (computed by the protocol tool) ---
@@ -256,6 +270,55 @@ export function createRuns({ explainEnabled = () => false, onOpenDesign = () => 
     } finally {
       button.disabled = false;
       if (selected?.id === runId) renderExplain();
+    }
+  });
+
+  // --- The scientist's rating, for the lab's experiment notebook ([knowledge] record_experiments) ---
+
+  function renderFeedback() {
+    const run = selected;
+    const show = FINISHED.has(run.status) && feedback?.runId === run.id && feedback.enabled;
+    $("feedback").hidden = !show;
+    if (!show) return;
+    for (const button of $("feedback-rating").querySelectorAll("button")) {
+      button.setAttribute("aria-checked", String(button.dataset.rating === feedbackDraft.rating));
+    }
+    const saved = feedback.saved;
+    const changed = feedbackDraft.rating !== (saved?.rating ?? "") || feedbackDraft.notes.trim() !== (saved?.notes ?? "");
+    $("feedback-save").disabled = !feedbackDraft.rating || !changed;
+    $("feedback-saved").textContent = changed && saved ? "Not saved" : saved ? `Saved ${formatTime(saved.updated_at)}` : "Not rated yet";
+  }
+
+  $("feedback-rating").addEventListener("click", (e) => {
+    const button = e.target.closest("button[data-rating]");
+    if (!button || !feedbackDraft) return;
+    feedbackDraft.rating = button.dataset.rating;
+    renderFeedback();
+  });
+
+  $("feedback-notes").addEventListener("input", (e) => {
+    if (!feedbackDraft) return;
+    feedbackDraft.notes = e.target.value;
+    renderFeedback();
+  });
+
+  $("feedback").addEventListener("submit", async (e) => {
+    e.preventDefault();
+    if (!selected || !feedbackDraft?.rating) return;
+    const runId = selected.id;
+    const button = $("feedback-save");
+    button.disabled = true;
+    button.textContent = "Saving…";
+    try {
+      const saved = (await api(`/api/runs/${encodeURIComponent(runId)}/feedback`, {
+        method: "PUT", json: { rating: feedbackDraft.rating, notes: feedbackDraft.notes },
+      })).feedback;
+      if (feedback?.runId === runId) feedback.saved = saved;
+    } catch (err) {
+      alert(`Could not save the feedback: ${err.message}`);
+    } finally {
+      button.textContent = "Save to notebook";
+      if (selected?.id === runId) renderFeedback();
     }
   });
 

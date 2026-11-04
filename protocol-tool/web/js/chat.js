@@ -109,7 +109,9 @@ export function createChat({ getSession, onSession, onBusyChange }) {
         ...parts.map((part) =>
           part.type === "text"
             ? h("div", { class: "bubble md" }, markdown(part.text))
-            : h("div", { class: `tool-chip ${part.ok ? "ok" : "bad"}` }, icon(part.ok ? "check" : "warn"), h("span", {}, part.summary)),
+            : part.type === "notice" // e.g. the free quota ran out and a fallback model took over
+              ? h("div", { class: "tool-chip notice" }, icon("warn"), h("span", {}, part.text))
+              : h("div", { class: `tool-chip ${part.ok ? "ok" : "bad"}` }, icon(part.ok ? "check" : "warn"), h("span", {}, part.summary)),
         ),
       );
     };
@@ -130,6 +132,10 @@ export function createChat({ getSession, onSession, onBusyChange }) {
       },
       addTool(activity) {
         parts.push({ type: "tool", ...activity });
+        schedule();
+      },
+      addNotice(text) {
+        parts.push({ type: "notice", text });
         schedule();
       },
       setStatus(label) {
@@ -224,6 +230,12 @@ export function createChat({ getSession, onSession, onBusyChange }) {
           case "tool_done":
             reply.addTool(event.activity);
             reply.setStatus("Thinking…");
+            break;
+          case "status": // e.g. waiting out a per-minute limit
+            reply.setStatus(event.label);
+            break;
+          case "notice":
+            reply.addNotice(event.text);
             break;
           case "session":
             onSession(event.session);

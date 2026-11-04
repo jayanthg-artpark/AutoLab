@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import csv
 import io
 import logging
@@ -18,12 +19,12 @@ from . import __version__
 from .config import Settings, load_settings
 from .devices import DeviceError, Lab, build_lab
 from .devices.manual import ManualThor
-from .models import ProtocolSubmission, Run, RunStatus, new_run_id, well_sort_key
-from .planner import PlanError, plan_run
+from .models import ContinueTips, ProtocolSubmission, Run, RunStatus, StepStatus, new_run_id, well_sort_key
+from .planner import PlanError, decode_protocol_source, plan_run
 from .registry import Registry, load_registry
 from .sequencer import RunFinishedError, Sequencer
 from .store import RunStore
-from .tips import TipTracker
+from .tips import Rack, TipProblem, TipTracker, with_tip_state
 
 log = logging.getLogger(__name__)
 
@@ -157,6 +158,34 @@ def create_app(
     async def tip_racks() -> dict[str, Any]:
         """Tip racks on the Flex and how many tips each has left."""
         return {"racks": [rack.view() for rack in tips.racks()]}
+
+    @api.post("/tips/continue")
+    async def continue_tips(body: ContinueTips) -> dict[str, Any]:
+        """The protocol as the Flex would get it if it ran next after the queue: each pipette
+        starting at its rack's first unused tip. The protocol tool simulates this, so the design
+        shows the tips really used and fails if the racks on the deck run short."""
+        try:
+            source = decode_protocol_source(body.protocol_b64)
+        except PlanError as exc:
+            raise HTTPException(422, str(exc)) from exc
+        # Protocols that run before this one: queued runs, and the running run's protocols not started yet.
+        pending, queued = [], 0
+        for run in store.list(status=RunStatus.running, limit=5) + list(reversed(store.list(status=RunStatus.queued, limit=1000))):
+            uses = [run.protocol.steps[s.params["op"]].tips for s in run.steps
+                    if s.key == "operation" and s.status is StepStatus.pending
+                    and run.protocol.steps[s.params["op"]].type == "liquid_handling"]
+            if any(uses):
+                queued += 1
+                pending += [u for u in uses if u]
+        used = tips.used_after(pending + body.after)
+        try:
+            wrapped = with_tip_state(source, used)
+        except TipProblem as exc:
+            raise HTTPException(422, str(exc)) from exc
+        recorded = {r.slot: r for r in tips.racks()}
+        racks = [Rack(slot, recorded[slot].load_name, count, recorded[slot].updated_at).view()
+                 for slot, count in sorted(used.items()) if slot in recorded]
+        return {"protocol_b64": base64.b64encode(wrapped).decode(), "used": used, "racks": racks, "runs_ahead": queued}
 
     @api.post("/tips/{slot}/fresh")
     async def fresh_tip_rack(slot: str, load_name: str | None = None) -> dict[str, Any]:

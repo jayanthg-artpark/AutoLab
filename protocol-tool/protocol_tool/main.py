@@ -27,13 +27,15 @@ from .knowledge import Knowledge
 from .model_status import ModelChecker, ModelError, build_checker
 from .providers import resolve
 from .config import Settings, load_settings
+from .experiments import experiment_record, write_record
 from .master import MasterClient, MasterError, MasterUnavailable
-from .models import ChatEntry, DesignPatch, SendRequest, Session
-from .simulator import DeckRules, SimulatorUnavailable, simulate
+from .models import ChatEntry, Design, DesignPatch, ProtocolDraft, RunFeedback, SendRequest, Session, Simulation
+from .simulator import DeckRules, DeckTips, SimulatorUnavailable, simulate
 from .store import SessionStore
-from .workflow import WorkflowError, build_submission, plan_hash, slug
+from .workflow import WorkflowError, build_submission, liquid_protocols, plan_hash, slug, tips_before
 
 INSTRUMENTS_TTL_S = 30.0
+RECORD_INTERVAL_S = 60.0  # how often finished runs are added to the experiment notebook
 FINISHED = {"succeeded", "failed", "aborted", "interrupted"}
 
 log = logging.getLogger(__name__)
@@ -101,9 +103,33 @@ def create_app(
             return "rejected", detail if isinstance(detail, str) else json.dumps(detail)[:1000]
         return "unavailable", f"master node returned {response.status_code}: {str(body)[:300]}"
 
+    async def deck_tips(design: Design, protocol: ProtocolDraft) -> DeckTips | None:
+        """The protocol as the Flex would get it when its run starts: after the runs queued ahead and the
+        protocols before it in this workflow have taken their tips. None if the master node can't say."""
+        body = {"protocol_b64": base64.b64encode(protocol.code.encode()).decode(), "after": tips_before(design, protocol.id)}
+        try:
+            response = await master.request("POST", "/tips/continue", json=body)
+            if not response.is_success:
+                return None
+            data = response.json()
+            return DeckTips(
+                run_code=base64.b64decode(data["protocol_b64"]).decode(), used=data["used"],
+                load_names={r["slot"]: r["load_name"] for r in data.get("racks", [])}, runs_ahead=data.get("runs_ahead", 0),
+            )
+        except (MasterUnavailable, ValueError, KeyError):
+            return None
+
+    async def simulate_protocol(design: Design, protocol: ProtocolDraft, tips: DeckTips | None = None) -> Simulation:
+        """Simulates a protocol starting from the tips left on the deck, as its run will."""
+        return await simulate(
+            protocol.code, protocol.plate_slot, python=settings.simulator.python, timeout_s=settings.simulator.timeout_s,
+            rules=DeckRules.from_settings(settings.lab, settings.simulator.python),
+            deck_tips=tips or await deck_tips(design, protocol),
+        )
+
     assistant = Assistant(
         settings, store, model, checker, tip_racks=tip_racks_on_deck,
-        instruments=lab_instruments, preview_plan=preview_plan, knowledge=knowledge,
+        instruments=lab_instruments, preview_plan=preview_plan, knowledge=knowledge, simulate_protocol=simulate_protocol,
     )
 
     @asynccontextmanager
@@ -112,7 +138,10 @@ def create_app(
         startup_check = asyncio.create_task(checker.log_startup()) if checker else None
         # Index the knowledge folder in the background, so the first lookup doesn't wait for it.
         warm_knowledge = asyncio.create_task(asyncio.to_thread(knowledge.documents))
+        recorder = asyncio.create_task(record_finished_runs()) if settings.knowledge.record_experiments else None
         yield
+        if recorder:
+            recorder.cancel()
         warm_knowledge.cancel()
         if startup_check:
             startup_check.cancel()
@@ -209,16 +238,15 @@ def create_app(
         session = get_session(session_id)
         require_idle(session)
         design = session.design
-        targets = [design.protocol(protocol)] if protocol else [p for p in design.protocols if p.code]
+        # In workflow order: each protocol starts where the ones before it leave the tip racks.
+        in_workflow = liquid_protocols(design)
+        ordered = in_workflow + [p for p in design.protocols if p.code and all(p is not q for q in in_workflow)]
+        targets = [design.protocol(protocol)] if protocol else ordered
         if not targets or targets[0] is None or not targets[0].code:
             raise HTTPException(400, "There is no protocol to simulate yet")
         for p in targets:
             try:
-                p.simulation = await simulate(
-                    p.code, p.plate_slot,
-                    python=settings.simulator.python, timeout_s=settings.simulator.timeout_s,
-                    rules=DeckRules.from_settings(settings.lab, settings.simulator.python),
-                )
+                p.simulation = await simulate_protocol(design, p)
             except SimulatorUnavailable as exc:
                 raise HTTPException(503, str(exc)) from exc
             store.save(session)
@@ -236,13 +264,16 @@ def create_app(
         )
 
     async def submission_for(session: Session, request: SendRequest) -> dict[str, Any]:
-        # A protocol checked under older lab rules (API level, labware list) is checked again first.
+        # A protocol checked under older lab rules (API level, labware list), or against tip racks that
+        # have changed since (another run took tips), is checked again first, in workflow order.
         rules = DeckRules.from_settings(settings.lab, settings.simulator.python)
-        for p in session.design.protocols:
-            if p.code and p.simulation_current and p.simulation.rules != rules.signature:
+        for p in liquid_protocols(session.design):
+            if not p.simulation_current:
+                continue
+            tips = await deck_tips(session.design, p)
+            if p.simulation.rules != rules.signature or (tips and p.simulation.tip_state != tips.used):
                 try:
-                    p.simulation = await simulate(p.code, p.plate_slot, python=settings.simulator.python,
-                                                  timeout_s=settings.simulator.timeout_s, rules=rules)
+                    p.simulation = await simulate_protocol(session.design, p, tips)
                 except SimulatorUnavailable as exc:
                     raise HTTPException(503, str(exc)) from exc
                 store.save(session)
@@ -267,10 +298,12 @@ def create_app(
         if status == "rejected":
             raise HTTPException(422, f"The master node can't run this: {data}")
         instruments = await lab_instruments() or []
+        tips = [{"protocol": p.title or p.id, **rack} for p in liquid_protocols(session.design) for rack in p.simulation.tip_racks]
         return {
             "plan_hash": plan_hash(submission),
             "steps": data["steps"],
             "warnings": data.get("warnings", []),
+            "tips": tips,
             "instruments": {i["id"]: {"name": i["name"], "kind": i["kind"], "driver": i["driver"]} for i in instruments},
         }
 
@@ -349,6 +382,58 @@ def create_app(
             raise HTTPException(502, str(exc)) from exc
         return run, results
 
+    # --- Experiment notebook: a record of each finished run, with the scientist's rating ----------
+
+    async def record_experiment(run_id: str, run: dict[str, Any] | None = None, results: dict[str, Any] | None = None) -> str | None:
+        """Writes (or rewrites) the run's experiment record; returns its knowledge document id."""
+        if run is None:
+            run, results = await run_and_results(run_id)
+        if run["status"] not in FINISHED:
+            return None
+        analyses = await asyncio.to_thread(analyse_run, run.get("protocol", {}).get("analysis") or [], results)
+        found = store.run_design(run_id)
+        note = store.run_note(run_id)
+        text = experiment_record(
+            run, found[0].design if found else None, analyses=analyses, results=results,
+            note=note["text"] if note else "", feedback=store.run_feedback(run_id),
+        )
+        doc = await asyncio.to_thread(write_record, knowledge.root, run_id, text)
+        store.save_experiment_record(run_id, doc)
+        return doc
+
+    async def record_finished_runs() -> None:
+        """Adds every newly finished run to the notebook, whether or not anyone opens it."""
+        while True:
+            try:
+                response = await master.request("GET", "/runs", params={"limit": 50})
+                runs = response.json() if response.is_success else []
+            except (MasterUnavailable, ValueError):
+                runs = []  # try again next time
+            for summary in runs:
+                if summary["status"] in FINISHED and store.experiment_record(summary["id"]) is None:
+                    try:
+                        await record_experiment(summary["id"])
+                    except Exception as exc:
+                        log.warning("Could not record run %s in the experiment notebook: %s", summary["id"],
+                                    exc.detail if isinstance(exc, HTTPException) else exc)
+            await asyncio.sleep(RECORD_INTERVAL_S)
+
+    @app.get("/api/runs/{run_id}/feedback")
+    async def read_feedback(run_id: str) -> dict[str, Any]:
+        return {"enabled": settings.knowledge.record_experiments, "feedback": store.run_feedback(run_id),
+                "record": store.experiment_record(run_id)}
+
+    @app.put("/api/runs/{run_id}/feedback")
+    async def save_feedback(run_id: str, feedback: RunFeedback) -> dict[str, Any]:
+        """The scientist's rating and notes; the run's experiment record is rewritten with them."""
+        if not settings.knowledge.record_experiments:
+            raise HTTPException(403, "The experiment notebook is turned off ([knowledge] record_experiments = false)")
+        run, results = await run_and_results(run_id)
+        if run["status"] not in FINISHED:
+            raise HTTPException(409, "The run hasn't finished yet")
+        saved = store.save_run_feedback(run_id, feedback.rating, feedback.notes.strip())
+        return {"enabled": True, "feedback": saved, "record": await record_experiment(run_id, run, results)}
+
     @app.get("/api/runs/{run_id}/analysis")
     async def run_analysis(run_id: str) -> dict[str, Any]:
         """The run's planned analyses (curve fits, interpolated samples, comparisons) on its readings."""
@@ -385,7 +470,10 @@ def create_app(
             raise HTTPException(503, f"The AI model could not summarise the run: {exc}") from exc
         if not text:
             raise HTTPException(503, "The AI model returned no summary")
-        return {"enabled": True, "note": store.save_run_note(run_id, run["status"], text)}
+        saved = store.save_run_note(run_id, run["status"], text)
+        if settings.knowledge.record_experiments and store.experiment_record(run_id):
+            await record_experiment(run_id, run, results)  # the record includes the summary
+        return {"enabled": True, "note": saved}
 
     # --- Runs, relayed from the master node -----------------------------------------
 

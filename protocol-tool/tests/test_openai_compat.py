@@ -136,12 +136,12 @@ OVERLOADED = b'[{"error": {"code": 503, "message": "This model is currently expe
 OK = sse(delta(content="ok"), delta(finish="stop"))
 
 
-def test_busy_or_rate_limited_models_fall_back_and_stick():
+def test_busy_or_rate_limited_models_fall_back():
     api = FakeChatAPI(
         (429, b'{"error": {"message": "quota"}}'),  # main model: out of quota -> next model at once
         (503, OVERLOADED),                          # first fallback: busy -> one retry
         (200, OK),
-        (200, OK),                                  # next request starts with the model that answered
+        (200, OK),                                  # the main model rests: the next request starts with the one that answered
     )
     model = OpenAICompatModel(GEMINI, httpx.MockTransport(api))
     assert collect(model)[-1].content == [{"type": "text", "text": "ok"}]
@@ -241,3 +241,143 @@ def test_a_full_design_turn_through_the_adapter(settings):
     assert events[-1]["entry"]["text"] == "The protocol passes simulation."
     second = api.requests[1]["messages"]
     assert second[-1]["role"] == "tool" and "Simulation PASSED" in second[-1]["content"]
+
+
+DAILY = (b'[{"error": {"code": 429, "message": "You exceeded your current quota. Quota exceeded for metric: '
+         b'generativelanguage.googleapis.com/generate_content_free_tier_requests, limit: 20", "status": "RESOURCE_EXHAUSTED", '
+         b'"details": [{"@type": "type.googleapis.com/google.rpc.QuotaFailure", "violations": [{"quotaId": '
+         b'"GenerateRequestsPerDayPerProjectPerModel-FreeTier"}]}]}}]')
+
+
+def per_minute(delay: str) -> bytes:
+    return (b'[{"error": {"code": 429, "message": "Quota exceeded. Please retry in ' + delay.encode() + b's.", '
+            b'"status": "RESOURCE_EXHAUSTED", "details": [{"@type": "type.googleapis.com/google.rpc.QuotaFailure", '
+            b'"violations": [{"quotaId": "GenerateRequestsPerMinutePerProjectPerModel-FreeTier"}]}, '
+            b'{"@type": "type.googleapis.com/google.rpc.RetryInfo", "retryDelay": "' + delay.encode() + b's"}]}}]')
+
+
+def test_quota_details_are_read_from_geminis_error():
+    from protocol_tool.openai_compat import _quota
+
+    no_header = {"content-type": "application/json"}
+    assert _quota(httpx.Response(429, content=per_minute("37"), headers=no_header)) == (37.0, False)
+    assert _quota(httpx.Response(429, content=DAILY, headers=no_header)) == (None, True)
+    assert _quota(httpx.Response(429, content=b"{}", headers={"retry-after": "12"})) == (12.0, False)
+
+
+def test_a_used_up_daily_quota_rests_the_model_until_the_reset(monkeypatch):
+    now = [1_000_000.0]
+    monkeypatch.setattr("protocol_tool.openai_compat.time.time", lambda: now[0])
+    api = FakeChatAPI((429, DAILY), (200, OK), (200, OK), (200, OK))
+    model = OpenAICompatModel(GEMINI, httpx.MockTransport(api))
+    collect(model)
+    collect(model)  # the main model isn't asked again today
+    assert [r["model"] for r in api.requests] == ["gemini-flash-latest", "gemini-3.5-flash", "gemini-3.5-flash"]
+    now[0] += 86_400  # after midnight Pacific time: back to the main model
+    collect(model)
+    assert api.requests[-1]["model"] == "gemini-flash-latest"
+
+
+def test_the_last_model_waits_out_a_per_minute_limit(monkeypatch):
+    waits = []
+
+    async def sleep(seconds):
+        waits.append(seconds)
+
+    monkeypatch.setattr("protocol_tool.openai_compat.asyncio.sleep", sleep)
+    single = resolve(AssistantSettings(provider="gemini", fallback_models=[]))
+    api = FakeChatAPI((429, per_minute("0")), (200, OK))
+    events = collect(OpenAICompatModel(single, httpx.MockTransport(api)))
+    assert events[0] == {"type": "status", "label": "Gemini is at its free per-minute limit; waiting 0 s…"}
+    assert waits == [0.0] and events[-1].content == [{"type": "text", "text": "ok"}]
+
+    # A daily limit isn't waited for, and once every model rests the error says when quota is back.
+    api = FakeChatAPI((429, DAILY))
+    model = OpenAICompatModel(single, httpx.MockTransport(api))
+    with pytest.raises(ModelError, match="free daily limit for gemini-flash-latest is used up"):
+        collect(model)
+    with pytest.raises(ModelError, match="resets at midnight Pacific time"):
+        collect(model)
+    assert len(api.requests) == 1
+
+
+def fallback_chain(gemini_api, ollama_transport):
+    from protocol_tool.assistant import FallbackModel
+
+    single = resolve(AssistantSettings(provider="gemini", fallback_models=[]))
+    return FallbackModel([
+        (single, OpenAICompatModel(single, httpx.MockTransport(gemini_api), max_wait_s=0)),
+        (OLLAMA, OpenAICompatModel(OLLAMA, ollama_transport)),
+    ])
+
+
+def test_ollama_takes_over_when_gemini_is_out_of_quota(monkeypatch):
+    now = [1_000_000.0]
+    monkeypatch.setattr("protocol_tool.openai_compat.time.time", lambda: now[0])
+    gemini = FakeChatAPI((429, per_minute("30")), (200, OK))
+    ollama = FakeChatAPI((200, OK), (200, OK))
+    model = fallback_chain(gemini, httpx.MockTransport(ollama))
+
+    events = collect(model)
+    notice = next(e for e in events if isinstance(e, dict) and e["type"] == "notice")
+    assert notice["text"] == ("Gemini can't answer right now (its free per-minute limit was reached), "
+                              "so Ollama (qwen3:30b) continues.")
+    assert events[-1].content == [{"type": "text", "text": "ok"}]
+    # While Gemini rests, Ollama answers without another notice or a request to Gemini.
+    events = collect(model)
+    assert not any(isinstance(e, dict) and e["type"] == "notice" for e in events)
+    assert len(gemini.requests) == 1 and len(ollama.requests) == 2
+    # Once the limit has passed, Gemini answers again and the chat says so.
+    now[0] += 31
+    events = collect(model)
+    assert {"type": "notice", "text": "Gemini is available again; back to Gemini (gemini-flash-latest)."} in events
+    assert len(gemini.requests) == 2
+
+
+def test_when_no_fallback_can_answer_the_reply_says_why():
+    def refuse(request):
+        raise httpx.ConnectError("refused")
+
+    model = fallback_chain(FakeChatAPI((429, DAILY)), httpx.MockTransport(refuse))
+    with pytest.raises(ModelError) as err:
+        collect(model)
+    message = str(err.value)
+    assert message.startswith("Gemini's free daily limit for gemini-flash-latest is used up")
+    assert "Ollama (qwen3:30b) couldn't take over either: Ollama is not running" in message
+
+
+def test_a_bad_main_key_is_reported_not_hidden_by_the_fallback():
+    model = fallback_chain(FakeChatAPI((401, b'{"error": {"message": "bad key"}}')), httpx.MockTransport(lambda r: httpx.Response(500)))
+    with pytest.raises(ModelAuthError):
+        collect(model)
+
+
+def test_other_providers_take_over_only_when_configured(settings):
+    from protocol_tool.assistant import FallbackModel, build_model
+
+    settings.assistant.provider = "gemini"
+    assert isinstance(build_model(settings, resolve(settings.assistant)), OpenAICompatModel)
+    settings.assistant.fallback_providers = ["ollama", "claude"]
+    model = build_model(settings, resolve(settings.assistant))
+    assert isinstance(model, FallbackModel) and [p.name for p, _ in model._chain] == ["gemini", "ollama", "claude"]
+    settings.assistant.fallback_providers = ["openai"]
+    with pytest.raises(ValueError, match="fallback_providers can name"):
+        build_model(settings, resolve(settings.assistant))
+
+
+def test_the_switch_is_shown_in_the_chat_and_kept(settings):
+    store = SessionStore(settings.server.database)
+    session = Session()
+    store.save(session)
+    model = fallback_chain(FakeChatAPI((429, DAILY)), httpx.MockTransport(FakeChatAPI((200, OK))))
+    assistant = Assistant(settings, store, model)
+
+    async def go():
+        return [e async for e in assistant.chat(session, "hello", [])]
+
+    events = asyncio.run(go())
+    assert [e["type"] for e in events if e["type"] in ("notice", "text")] == ["notice", "text"]
+    parts = session.transcript[-1].parts
+    assert parts[0] == {"type": "notice", "text": "Gemini can't answer right now (its free daily limit is used up), "
+                                                  "so Ollama (qwen3:30b) continues."}
+    assert parts[1] == {"type": "text", "text": "ok"} and not session.transcript[-1].error

@@ -172,6 +172,14 @@ used and starts every pipette at its rack's next unused tip:
 - A run that stops early still counts all its tips as used, so the count can
   only be too low, never too high: the Flex never reaches for a tip that isn't
   there.
+- **Before a run is sent,** the protocol tool simulates each protocol as the
+  Flex will get it. `POST /tips/continue` returns the protocol with those
+  starting-tip lines and the counts it used. The counts are the racks on the
+  deck after the runs queued ahead (and the running run's protocols that haven't
+  started) have taken their tips, plus any earlier protocols of the same run
+  (`after`). So the design shows the tips each rack will really have, and fails
+  before review if the deck runs short. The same protocol sent again starts
+  where the last run stopped.
 
 When you put a **full rack** on the deck, click **New rack** next to it on the
 protocol tool's Runs tab. When you **take a rack off**, click **Removed**. A
@@ -195,6 +203,7 @@ The counts are in the `tip_racks` table of `master_node.db`.
 | `GET /runs/{id}/results` | Every measurement (reads, qPCR) as JSON |
 | `GET /runs/{id}/results.csv` | Measurements as CSV, one row per well |
 | `GET /tips` | Tip racks on the Flex: tips used and left, next tip |
+| `POST /tips/continue` | A protocol (`protocol_b64`) as the Flex would get it after the runs queued ahead: starting at each rack's next unused tip |
 | `POST /tips/{slot}/fresh` | A full rack was put in this slot |
 | `DELETE /tips/{slot}` | The rack in this slot was taken off |
 

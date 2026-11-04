@@ -5,21 +5,21 @@ import asyncio
 from protocol_tool.config import LabSettings
 from protocol_tool.simulator import DeckRules, latest_api_level, simulate
 
-from .conftest import BROKEN_PROTOCOL, GOOD_PROTOCOL
+from .conftest import BROKEN_PROTOCOL, GOOD_PROTOCOL, LATEST
 
 LAB = DeckRules.from_settings(LabSettings())  # the lab's defaults: latest API level, Flex labware list
 
 
 def test_the_lab_uses_the_newest_api_level():
-    assert LAB.api_level == latest_api_level() == "2.29"
+    assert LAB.api_level == latest_api_level() == LATEST
     assert f'"apiLevel": "{LAB.api_level}"' in GOOD_PROTOCOL
     assert asyncio.run(simulate(GOOD_PROTOCOL, "D2", rules=LAB)).ok
 
 
 def test_older_api_levels_fail():
-    sim = asyncio.run(simulate(GOOD_PROTOCOL.replace('"2.29"', '"2.20"'), "D2", rules=LAB))
+    sim = asyncio.run(simulate(GOOD_PROTOCOL.replace(f'"{LATEST}"', '"2.20"'), "D2", rules=LAB))
     assert not sim.ok
-    assert any("Use the lab's Opentrons API level 2.29 (this protocol uses 2.20)" in e for e in sim.errors)
+    assert any(f"Use the lab's Opentrons API level {LATEST} (this protocol uses 2.20)" in e for e in sim.errors)
 
 
 def test_ot2_tip_racks_and_unlisted_labware_fail():

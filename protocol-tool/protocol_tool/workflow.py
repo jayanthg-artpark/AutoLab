@@ -64,6 +64,23 @@ def build_submission(
     }
 
 
+def liquid_protocols(design: Design) -> list:
+    """The protocols the workflow runs, in the order it runs them (each once)."""
+    ids = dict.fromkeys(s.protocol_id for s in design.workflow if s.type == "liquid_handling")
+    return [p for pid in ids if (p := design.protocol(pid)) and p.code]
+
+
+def tips_before(design: Design, protocol_id: str) -> list[list[dict[str, Any]]]:
+    """Tip use of the protocols that run before this one in the workflow (they take their tips first)."""
+    out = []
+    for p in liquid_protocols(design):
+        if p.id == protocol_id:
+            break
+        if p.simulation_current and p.simulation.tips:
+            out.append(p.simulation.tips)
+    return out
+
+
 def plan_hash(submission: dict[str, Any]) -> str:
     """Identifies exactly what would be sent; approval is tied to it."""
     return hashlib.sha256(json.dumps(submission, sort_keys=True).encode()).hexdigest()[:16]

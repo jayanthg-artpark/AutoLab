@@ -22,6 +22,10 @@ api_key_env = ""          # empty = the provider's default (see above)
 # fallback_models = ["gemini-3.5-flash", "gemini-flash-lite-latest"]
 #                         # tried in order when the model is overloaded, out of quota or retired
 #                         # (default for gemini as shown; [] turns fallbacks off)
+# fallback_providers = ["ollama"]
+#                         # other providers to continue with when every model above is out of
+#                         # quota, busy or unreachable: "ollama" (free, this PC), "claude" (paid),
+#                         # "gemini". Default: none
 effort = "high"           # Claude only: low | medium | high | xhigh | max
 max_tool_rounds = 16      # most tool calls (look up, write/simulate/fix, workflow, analysis) per reply
 max_upload_mb = 20
@@ -44,8 +48,9 @@ blocked_slots = ["A1", "A2"]  # kept empty: no labware, tip racks, modules, fixt
 trash_slot = "A3"         # fixed trash bin
 waste_chute_slot = "D3"   # fixed waste chute; "" if the deck has none
 # Python Protocol API level every protocol must use. "latest" = the newest the installed
-# opentrons package supports (2.31 with opentrons 10.0.0). The Flex's robot software must
-# support it too: update the Flex, or set the level its software supports, e.g. "2.27".
+# opentrons package supports. The lab always runs the newest Opentrons software:
+# run-protocol-tool.cmd upgrades the package on every start, and the Flex must be kept
+# updated too (Opentrons App > the Flex > Robot Settings > update).
 api_level = "latest"
 # Labware protocols may load (load names, * wildcards). Anything else fails the simulation
 # check; OT-2 tip racks always fail. [] = any labware except OT-2 tip racks.
@@ -72,6 +77,10 @@ inventory = """
 [knowledge]
 # Folder the assistant searches: manuals\ (kit manuals, IFUs) and templates\ (assay templates).
 folder = "knowledge"
+# Keep a record of every finished run in knowledge\experiments\ (the lab's experiment
+# notebook), with the scientist's rating from the Runs tab. The assistant searches it,
+# reuses designs that worked and is warned about ones that failed.
+record_experiments = true
 
 [results]
 # "Explain" on the Runs tab: the AI model summarises a finished run's results, or suggests

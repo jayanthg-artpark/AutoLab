@@ -6,12 +6,14 @@ Files in the knowledge folder (by default protocol-tool/knowledge):
   templates/  assay templates: Markdown or text describing a standard workflow
   protocols/  example protocols from other labs (Opentrons Protocol Library, protocols.io, ...)
   reference/  reference documentation (the Opentrons Python API, ...)
+  experiments/ the lab's own finished runs, one record each (written by experiments.py)
 
 are split into passages and searched by keyword (no AI needed to search; the
 assistant decides what to look up and what to make of it). The index is
 rebuilt whenever a file is added, changed or removed. knowledge_import.py
 fills protocols/ and reference/ from public sources; sources.json records
-where each imported document came from and under what terms.
+where each imported document came from and under what terms. Experiment records
+are ranked by the scientist's rating: worked first, not reviewed last.
 """
 
 from __future__ import annotations
@@ -25,12 +27,17 @@ from collections import Counter
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from .experiments import RATING_LABEL, rating_of
+
 log = logging.getLogger(__name__)
 
 FOLDERS = {
     "manuals": "Kit manual", "templates": "Assay template",
     "protocols": "Example protocol", "reference": "Reference",
+    "experiments": "Lab experiment",
 }
+# Experiment records' search scores are multiplied by these, by the scientist's rating.
+RATING_WEIGHT = {"worked": 1.5, "partly": 1.1, "failed": 0.9, "": 0.6}
 SUFFIXES = {".pdf", ".md", ".txt", ".py"}
 SOURCES_FILE = "sources.json"
 PASSAGE_CHARS = 1500
@@ -54,6 +61,7 @@ class Document:
     title: str
     pages: int
     chars: int
+    rating: str = ""  # experiment records: worked | partly | failed | "" (not reviewed)
 
 
 def _terms(text: str) -> list[str]:
@@ -100,7 +108,9 @@ class Knowledge:
                 log.warning("Knowledge: could not read %s: %s", doc_id, exc)
                 continue
             title = _title(path, pages)
-            docs[doc_id] = Document(doc_id, FOLDERS[doc_id.split("/")[0]], title, len(pages), sum(map(len, pages)))
+            folder = doc_id.split("/")[0]
+            rating = rating_of(pages[0]) if folder == "experiments" and pages else ""
+            docs[doc_id] = Document(doc_id, FOLDERS[folder], title, len(pages), sum(map(len, pages)), rating)
             for number, text in enumerate(pages, start=1 if path.suffix.lower() == ".pdf" else 0):
                 for chunk in _chunks(text):
                     passages.append(Passage(doc_id, number, chunk, Counter(_terms(chunk + " " + title))))
@@ -121,8 +131,12 @@ class Knowledge:
         doc = self._docs.get(doc_id)
         return doc.title if doc else doc_id
 
-    def search(self, query: str, limit: int = 5, per_doc: int = 2) -> list[tuple[Passage, float]]:
-        """Passages that best match the query (BM25), at most `per_doc` from any one document."""
+    def document(self, doc_id: str) -> Document | None:
+        return self._docs.get(doc_id)
+
+    def search(self, query: str, limit: int = 5, per_doc: int = 2, folder: str = "") -> list[tuple[Passage, float]]:
+        """Passages that best match the query (BM25), at most `per_doc` from any one document.
+        `folder` limits the search to one folder, e.g. "experiments"."""
         with self._lock:
             self._refresh()
             words = set(_terms(query))
@@ -132,6 +146,8 @@ class Knowledge:
             avg = sum(sum(p.terms.values()) for p in self._passages) / n
             scored = []
             for p in self._passages:
+                if folder and not p.doc.startswith(folder + "/"):
+                    continue
                 length = sum(p.terms.values())
                 score = 0.0
                 for w in words:
@@ -141,6 +157,8 @@ class Knowledge:
                     idf = math.log(1 + (n - self._df[w] + 0.5) / (self._df[w] + 0.5))
                     score += idf * tf * 2.2 / (tf + 1.2 * (0.25 + 0.75 * length / avg))
                 if score > 0:
+                    if p.doc.startswith("experiments/"):
+                        score *= RATING_WEIGHT[self._docs[p.doc].rating]
                     scored.append((p, score))
             scored.sort(key=lambda item: item[1], reverse=True)
             hits, per = [], Counter()
@@ -191,6 +209,11 @@ class Knowledge:
             count = sum(1 for d in docs if d.id.startswith(folder + "/"))
             if count:
                 parts.append(f"{count} {FOLDERS[folder].lower()}{'s' if folder == 'protocols' else ' pages'} under {folder}/ (search them)")
+        experiments = [d for d in docs if d.id.startswith("experiments/")]
+        if experiments:
+            ratings = Counter(d.rating for d in experiments)
+            counts = ", ".join(f"{ratings[r]} {label}" for r, label in RATING_LABEL.items() if ratings[r])
+            parts.append(f"{len(experiments)} lab experiments under experiments/ ({counts}; search them with folder \"experiments\")")
         return "; ".join(parts)
 
 

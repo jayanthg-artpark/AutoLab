@@ -15,7 +15,10 @@ import io
 import json
 import logging
 import os
+import re
+import time
 import uuid
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 import httpx
@@ -27,7 +30,12 @@ from .providers import Provider
 log = logging.getLogger(__name__)
 
 MAX_PDF_CHARS = 150_000
-RATE_LIMIT_RETRIES = 3
+# Longest a request waits out a per-minute limit before giving up on that model.
+RATE_LIMIT_MAX_WAIT_S = 60.0
+RATE_LIMIT_WAITS = 3
+# How long a model isn't tried after it was busy or turned out not to exist.
+REST_OVERLOADED_S = 30.0
+REST_NOT_FOUND_S = 3600.0
 _pdf_cache: dict[str, str] = {}
 
 
@@ -38,26 +46,43 @@ class Overloaded(ModelError):
 class RateLimited(ModelError):
     """This model's quota is used up for now (free tiers limit each model separately)."""
 
+    def __init__(self, message: str, retry_after: float | None = None, per_day: bool = False):
+        super().__init__(message)
+        self.retry_after = retry_after  # seconds the provider asked us to wait, if it said
+        self.per_day = per_day  # the daily quota: waiting a minute won't help
+
 
 class OpenAICompatModel:
-    """Tries the configured model first, then the fallbacks, and stays with whichever answers."""
+    """Tries the configured model first, then the fallbacks.
 
-    def __init__(self, provider: Provider, transport: httpx.AsyncBaseTransport | None = None):
+    A model that is out of quota, busy or retired rests: it isn't tried again until its
+    quota is back (the next minute, or midnight Pacific time for a daily limit), and then
+    requests go back to it. On the last model left, a short per-minute limit is waited out.
+    """
+
+    def __init__(
+        self, provider: Provider, transport: httpx.AsyncBaseTransport | None = None,
+        max_wait_s: float = RATE_LIMIT_MAX_WAIT_S,
+    ):
         self._provider = provider
         self._client = httpx.AsyncClient(timeout=httpx.Timeout(600, connect=10), transport=transport)
         self._models = list(dict.fromkeys([provider.model, *provider.fallback_models]))
-        self._active = 0
+        self._max_wait_s = max_wait_s
+        self._resting: dict[str, tuple[float, bool]] = {}  # model -> (not tried until, daily limit)
 
     @property
     def active_model(self) -> str:
-        return self._models[self._active]
+        """The model the next request starts with."""
+        return next((m for m in self._models if not self._is_resting(m)), self._models[0])
 
     async def stream(self, system, tools, messages):
         p = self._provider
-        order = self._models[self._active:] + self._models[:self._active]
+        ready = [m for m in self._models if not self._is_resting(m)]
+        if not ready:
+            raise self._all_resting()
         last_error: ModelError | None = None
-        for position, model in enumerate(order):
-            is_last = position == len(order) - 1
+        for position, model in enumerate(ready):
+            is_last = position == len(ready) - 1
             body = {
                 "model": model,
                 "messages": to_openai_messages(system, messages, model),
@@ -65,21 +90,60 @@ class OpenAICompatModel:
             }
             if tools:  # some servers reject an empty tool list
                 body["tools"] = [to_openai_tool(t) for t in tools]
-            chunks = self._post(body, retry_rate_limit=is_last)
-            try:
-                first = await anext(chunks, None)  # sends the request; raises on HTTP errors
-            except (Overloaded, RateLimited, ModelNotFound) as exc:
+            waited = 0.0
+            for attempt in range(RATE_LIMIT_WAITS + 1):
+                chunks = self._post(body)
+                try:
+                    first = await anext(chunks, None)  # sends the request; raises on HTTP errors
+                except RateLimited as exc:
+                    wait = exc.retry_after if exc.retry_after is not None else min(5.0 * 2**attempt, 30.0)
+                    can_wait = self._max_wait_s > 0 and attempt < RATE_LIMIT_WAITS and waited + wait <= self._max_wait_s
+                    if is_last and not exc.per_day and can_wait:
+                        yield {"type": "status", "label": f"{p.label} is at its free per-minute limit; waiting {wait:.0f} s…"}
+                        log.info("%s %s is rate-limited; waiting %.0f s", p.label, model, wait)
+                        await asyncio.sleep(wait)
+                        waited += wait
+                        continue
+                    last_error = exc
+                except (Overloaded, ModelNotFound) as exc:
+                    last_error = exc
+                else:
+                    if model != self._models[0]:
+                        log.info("%s: answering with %s", p.label, model)
+                    async for event in self._read(first, chunks, model):
+                        yield event
+                    return
+                self._rest(model, last_error)
                 if not is_last:
-                    log.warning("%s model %s unavailable (%s); trying %s", p.label, model, exc, order[position + 1])
-                last_error = exc
-                continue
-            if model != self.active_model:
-                log.info("%s: now using %s", p.label, model)
-                self._active = self._models.index(model)
-            async for event in self._read(first, chunks, model):
-                yield event
-            return
+                    log.warning("%s model %s unavailable (%s); trying %s", p.label, model, last_error, ready[position + 1])
+                break
         raise last_error or ModelError(f"No {p.label} model answered")
+
+    def _is_resting(self, model: str) -> bool:
+        until, _ = self._resting.get(model, (0.0, False))
+        return time.time() < until
+
+    def _rest(self, model: str, exc: ModelError) -> None:
+        now = time.time()
+        if isinstance(exc, RateLimited):
+            wait = 60.0 if exc.retry_after is None else exc.retry_after
+            until = next_quota_reset(now) if exc.per_day else now + max(wait, 5.0)
+        else:
+            until = now + (REST_NOT_FOUND_S if isinstance(exc, ModelNotFound) else REST_OVERLOADED_S)
+        self._resting[model] = (until, isinstance(exc, RateLimited) and exc.per_day)
+
+    def _all_resting(self) -> RateLimited:
+        """Every model is out of quota or busy: when the first one is back."""
+        p = self._provider
+        until, _ = min(self._resting[m] for m in self._models)
+        models = ", ".join(self._models)
+        if all(self._resting[m][1] for m in self._models):
+            when = datetime.fromtimestamp(until).strftime("%H:%M")
+            return RateLimited(f"{p.label}'s free daily limit is used up on every model ({models}). "
+                               f"It resets at midnight Pacific time ({when} on this PC).", until - time.time(), True)
+        wait = max(until - time.time(), 1)
+        return RateLimited(f"{p.label}'s free limit was reached on every model ({models}). "
+                           f"Send the message again in about {wait:.0f} s.", wait)
 
     async def _read(self, first, chunks, model: str):
         """Turns the streamed chunks into UI events and a final ModelTurn."""
@@ -135,14 +199,14 @@ class OpenAICompatModel:
             stop = "tool_use"
         yield ModelTurn(content=content, stop_reason=stop)
 
-    async def _post(self, body: dict[str, Any], retry_rate_limit: bool):
-        """Streams parsed chunks. Retries a busy server once; waits out rate limits only if asked."""
+    async def _post(self, body: dict[str, Any]):
+        """Streams parsed chunks. Retries a busy server once; rate limits are left to the caller."""
         p = self._provider
         load_key_file(p.key_env)
         headers = {"Authorization": f"Bearer {os.environ[p.key_env]}"} if p.key_env and os.environ.get(p.key_env) else {}
         if p.key_env and not headers:
             raise ModelAuthError("missing")
-        retries = {"overloaded": 1, "rate_limited": RATE_LIMIT_RETRIES if retry_rate_limit else 0}
+        retries = 1
         attempt = 0
         while True:
             try:
@@ -150,9 +214,8 @@ class OpenAICompatModel:
                     if response.is_error:
                         await response.aread()
                         error = _http_error(p, body["model"], response)
-                        kind = {Overloaded: "overloaded", RateLimited: "rate_limited"}.get(type(error))
-                        if kind and retries[kind] > 0:
-                            retries[kind] -= 1
+                        if isinstance(error, Overloaded) and retries > 0:
+                            retries -= 1
                             wait = _retry_after(response, attempt)
                             attempt += 1
                             log.info("%s %s answered %s; retrying in %.0f s", p.label, body["model"], response.status_code, wait)
@@ -187,6 +250,35 @@ def _retry_after(response: httpx.Response, attempt: int) -> float:
         return min(2 * 2**attempt, 30)
 
 
+def _quota(response: httpx.Response) -> tuple[float | None, bool]:
+    """From a 429: (seconds to wait if the provider said, whether it is a daily limit).
+
+    Gemini puts both in the body: a RetryInfo "retryDelay": "37s" (also "Please retry in 37.2s."
+    in the message) and the quota that ran out, e.g. "GenerateRequestsPerDayPerProjectPerModel-FreeTier"."""
+    text = response.text
+    per_day = bool(re.search(r"PerDay|per day|daily", text, re.IGNORECASE))
+    found = (re.search(r'"retryDelay"\s*:\s*"(\d+(?:\.\d+)?)s"', text)
+             or re.search(r"retry in (\d+(?:\.\d+)?)\s*s", text, re.IGNORECASE))
+    if found:
+        return float(found.group(1)), per_day
+    try:
+        return float(response.headers["retry-after"]), per_day
+    except (KeyError, ValueError):
+        return None, per_day
+
+
+def next_quota_reset(now: float) -> float:
+    """Midnight Pacific time after `now`, when Gemini's daily quotas reset."""
+    try:
+        from zoneinfo import ZoneInfo
+
+        pacific = ZoneInfo("America/Los_Angeles")
+    except Exception:  # no time zone data (Windows without the tzdata package): standard time
+        pacific = timezone(timedelta(hours=-8))
+    local = datetime.fromtimestamp(now, pacific)
+    return (local + timedelta(days=1)).replace(hour=0, minute=0, second=0, microsecond=0).timestamp()
+
+
 def _http_error(p: Provider, model: str, response: httpx.Response) -> ModelError:
     try:
         error = response.json()
@@ -201,7 +293,12 @@ def _http_error(p: Provider, model: str, response: httpx.Response) -> ModelError
     if response.status_code == 403:
         return ModelAuthError("no_access", message)
     if response.status_code == 429:
-        return RateLimited(f"{p.label}'s free-tier limit was reached. Wait a minute and send the message again. ({message})")
+        retry_after, per_day = _quota(response)
+        if per_day:
+            return RateLimited(f"{p.label}'s free daily limit for {model} is used up; it resets at midnight Pacific time. "
+                               f"({message})", retry_after, per_day=True)
+        return RateLimited(f"{p.label}'s free-tier limit for {model} was reached. Wait a minute and send the message again. "
+                           f"({message})", retry_after)
     if response.status_code in (500, 502, 503, 504):
         return Overloaded(f"{p.label} is overloaded right now ({response.status_code}). "
                           f"Send the message again in a minute. ({message})")
