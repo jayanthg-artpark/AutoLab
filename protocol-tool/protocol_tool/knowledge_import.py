@@ -6,6 +6,10 @@
   python -m protocol_tool.knowledge_import opentrons-docs
       The Opentrons Python API documentation (Flex and OT-2, Apache-2.0)
       -> knowledge/reference/opentrons-api/
+  python -m protocol_tool.knowledge_import opentrons-labware
+      Every standard Opentrons labware definition (plates, tube racks, reservoirs, Flex tip racks,
+      adapters): load name, wells, volumes and depths, from the installed opentrons package
+      (no download) -> knowledge/reference/opentrons-labware/
   python -m protocol_tool.knowledge_import protocols-io "ELISA" "qPCR" --limit 25
       Public protocols on protocols.io matching each search (CC BY 4.0; needs a free token,
       PROTOCOLS_IO_TOKEN in .env) -> knowledge/protocols/protocols-io/
@@ -224,6 +228,109 @@ def import_opentrons_docs(root: Path, *, transport: httpx.BaseTransport | None =
             count += 1
     sources.save()
     progress(f"Imported {count} documentation pages and examples into {root / 'reference' / 'opentrons-api'}")
+    return count
+
+
+# --- Opentrons labware definitions --------------------------------------------------------------------
+
+LABWARE_DIR = "reference/opentrons-labware"
+LABWARE_CATEGORIES = {
+    "wellPlate": "well plate", "tubeRack": "tube rack", "reservoir": "reservoir", "tipRack": "tip rack",
+    "aluminumBlock": "aluminum block", "adapter": "adapter", "lid": "lid", "other": "other labware",
+}
+LIQUID_HEIGHT_NOTE = (
+    "Liquid height: the robot knows the well's shape, not how full it is. Unless told otherwise it aspirates "
+    "1 mm above the bottom, so in a deep tube or reservoir the tip, and even the pipette, goes deep into the liquid. "
+    "Aspirate a few mm below the surface instead: give the well its starting volume with "
+    "well.load_liquid(liquid, volume_ul) and aspirate at well.meniscus(z=-3) (without load_liquid the simulation "
+    "fails), or have the Flex sense it with pipette.measure_liquid_height(well)."
+)
+
+
+def _volume(ul: float) -> str:
+    return f"{ul / 1000:g} mL ({ul:g} µL)" if ul >= 1000 else f"{ul:g} µL"
+
+
+def _labware_doc(d: dict, version: int, opentrons_version: str) -> str:
+    """One labware definition as a short Markdown page: what it is, how to load it, its wells."""
+    name, meta, wells = d["parameters"]["loadName"], d["metadata"], d["wells"]
+    category = LABWARE_CATEGORIES.get(meta["displayCategory"], meta["displayCategory"])
+    rows = sorted({w.rstrip("0123456789") for w in wells}, key=lambda r: (len(r), r))
+    brand = d.get("brand", {})
+    dims = d["dimensions"]
+    lines = [
+        f"# Labware: {meta['displayName']} ({name})", "",
+        f"Load: protocol.load_labware(\"{name}\", \"D1\")  (any free slot)",
+        f"Category: {category}. Brand: {brand.get('brand', '')}"
+        + (f" (catalogue {', '.join(brand['brandId'])})" if brand.get("brandId") else ""),
+        f"Size: {dims['xDimension']:g} x {dims['yDimension']:g} mm, {dims['zDimension']:g} mm tall",
+    ]
+    if wells:
+        lines.append(f"Wells: {len(wells)} in {len(rows)} rows ({rows[0]}-{rows[-1]}) x {len(d['ordering'])} columns")
+    groups = [g for g in d.get("groups") or [{"wells": list(wells), "metadata": {}}] if g["wells"]]
+    for group in groups:
+        first = wells[group["wells"][0]]
+        size = (f"{first['diameter']:g} mm across" if first["shape"] == "circular"
+                else f"{first['xDimension']:g} x {first['yDimension']:g} mm")
+        bottom = group["metadata"].get("wellBottomShape", "")
+        what = f"{len(group['wells'])} x {group['metadata']['displayName']}" if len(groups) > 1 else "Each well"
+        where = f" in {', '.join(group['wells'])}" if len(groups) > 1 else ""
+        lines.append(f"{what}{where}: holds {_volume(first['totalLiquidVolume'])}, {first['depth']:g} mm deep, "
+                     f"{first['shape']} {size}" + (f", {bottom} bottom" if bottom else "")
+                     + f"; its bottom is {first['z']:g} mm above the slot")
+    if d["parameters"].get("isTiprack"):
+        lines.append(f"Tip length: {d['parameters']['tipLength']:g} mm. Give it to a pipette with "
+                     f"load_instrument(..., tip_racks=[rack]).")
+    if adapters := [a for a in d.get("stackingOffsetWithLabware", {}) if a != name]:
+        lines.append(f"Sits on: {', '.join(adapters)}")
+    if modules := list(d.get("stackingOffsetWithModule", {})):
+        lines.append(f"Fits modules: {', '.join(modules)}")
+    if category in ("tube rack", "reservoir") or (category in ("well plate", "aluminum block")
+                                                   and max((w["depth"] for w in wells.values()), default=0) > 25):
+        lines += ["", LIQUID_HEIGHT_NOTE]
+    lines += ["", f"Source: Opentrons labware definition {name} v{version}, from the opentrons {opentrons_version} package. "
+                  f"License: {DOCS_LICENSE}", ""]
+    return "\n".join(lines)
+
+
+def import_opentrons_labware(root: Path, *, progress: Callable[[str], None] = print) -> int:
+    """Every standard Opentrons labware definition a Flex protocol can load, from the installed opentrons package."""
+    import opentrons
+    from opentrons_shared_data.labware import list_definitions, load_definition
+
+    latest: dict[str, tuple[int, int]] = {}
+    for name, version, schema in list_definitions():
+        latest[name] = max(latest.get(name, (0, 0)), (version, schema))
+    sources = Sources(root)
+    folder = root / LABWARE_DIR
+    for old in folder.glob("*.md"):  # definitions an upgrade dropped
+        old.unlink()
+        sources.entries.pop(f"{LABWARE_DIR}/{old.name}", None)
+    index: dict[str, list[str]] = {}
+    for name, (version, schema) in sorted(latest.items()):
+        d = load_definition(name, version, schema)
+        category = d["metadata"]["displayCategory"]
+        # Fixed trash and test definitions aren't loaded with load_labware; OT-2 tip racks don't fit Flex pipettes.
+        if category not in LABWARE_CATEGORIES or name.startswith("schema3test") or (
+                d["parameters"].get("isTiprack") and not name.startswith("opentrons_flex_")):
+            continue
+        doc_id = f"{LABWARE_DIR}/{name}.md"
+        _write(root, doc_id, _labware_doc(d, version, opentrons.__version__))
+        sources.add(doc_id, source="Opentrons labware library", url=f"https://labware.opentrons.com/{name}",
+                    license=DOCS_LICENSE)
+        index.setdefault(LABWARE_CATEGORIES[category], []).append(f"- {name}: {d['metadata']['displayName']}")
+    lines = ["# Labware: every standard Opentrons labware a Flex protocol can load", "",
+             f"From the opentrons {opentrons.__version__} package. Each has its own page in {LABWARE_DIR}/ with its "
+             "wells, volumes and depths. Pick the definition that matches what is really on the deck: never use "
+             "another labware as a stand-in (a 15 mL tube rack for 50 mL tubes puts the pipette in the wrong place).", ""]
+    for category, entries in index.items():
+        lines += [f"## {category[0].upper()}{category[1:]}s", "", *entries, ""]
+    _write(root, f"{LABWARE_DIR}/index.md", "\n".join(lines))
+    sources.add(f"{LABWARE_DIR}/index.md", source="Opentrons labware library", url="https://labware.opentrons.com/",
+                license=DOCS_LICENSE)
+    sources.save()
+    count = sum(len(entries) for entries in index.values())
+    progress(f"Imported {count} labware definitions into {folder}")
     return count
 
 
@@ -520,6 +627,7 @@ def main(argv: list[str] | None = None) -> int:
     sub = parser.add_subparsers(dest="source", required=True)
     sub.add_parser("opentrons-library", help="every protocol in the Opentrons Protocol Library")
     sub.add_parser("opentrons-docs", help="the Opentrons Python API documentation")
+    sub.add_parser("opentrons-labware", help="every standard Opentrons labware definition (from the installed opentrons)")
     pio = sub.add_parser("protocols-io", help="public protocols.io protocols matching search terms")
     pio.add_argument("queries", nargs="+")
     pio.add_argument("--limit", type=int, default=20, help="protocols per search (default 20)")
@@ -538,6 +646,8 @@ def main(argv: list[str] | None = None) -> int:
             import_opentrons_library(root)
         elif args.source == "opentrons-docs":
             import_opentrons_docs(root)
+        elif args.source == "opentrons-labware":
+            import_opentrons_labware(root)
         elif args.source == "protocols-io":
             import_protocols_io(root, args.queries, limit=args.limit)
         elif args.source == "github":

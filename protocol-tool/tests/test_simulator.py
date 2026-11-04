@@ -7,7 +7,7 @@ from protocol_tool.simulator import DeckRules, latest_api_level, simulate
 
 from .conftest import BROKEN_PROTOCOL, GOOD_PROTOCOL, LATEST
 
-LAB = DeckRules.from_settings(LabSettings())  # the lab's defaults: latest API level, Flex labware list
+LAB = DeckRules.from_settings(LabSettings())  # the lab's defaults: latest API level, any Opentrons labware
 
 
 def test_the_lab_uses_the_newest_api_level():
@@ -25,10 +25,17 @@ def test_older_api_levels_fail():
 def test_ot2_tip_racks_and_unlisted_labware_fail():
     code = GOOD_PROTOCOL.replace("opentrons_flex_96_tiprack_200ul", "opentrons_96_tiprack_300ul") \
                         .replace("nest_12_reservoir_15ml", "usascientific_12_reservoir_22ml")
-    sim = asyncio.run(simulate(code, "D2", rules=LAB))
+    listed = DeckRules(labware=("opentrons_flex_*", "corning_96_wellplate_360ul_flat", "nest_12_reservoir_15ml"))
+    sim = asyncio.run(simulate(code, "D2", rules=listed))
     assert not sim.ok
     assert any(e.startswith("opentrons_96_tiprack_300ul is an OT-2 tip rack. Use Flex tips") for e in sim.errors)
     assert any(e.startswith("usascientific_12_reservoir_22ml is not on the lab's Flex labware list") for e in sim.errors)
+
+
+def test_any_opentrons_labware_by_default():
+    code = GOOD_PROTOCOL.replace("nest_12_reservoir_15ml", "usascientific_12_reservoir_22ml")
+    sim = asyncio.run(simulate(code, "D2", rules=LAB))
+    assert not any("labware list" in e for e in sim.errors), sim.errors
 
 
 def test_ot2_tip_racks_fail_even_without_a_labware_list():
@@ -78,7 +85,9 @@ def test_the_assistant_is_told_the_rules():
     assert "A1 and A2 must stay empty for the whole run" in LAB.describe()
     assert "Lab staff can set up other labware in B1, B2, B3, C1, C2, C3, D1, D2" in LAB.describe()
     text = LAB.describe()
-    assert "Never OT-2 labware" in text and "Labware you may load" in text and "opentrons_flex_*" in text
+    assert "Never OT-2 tip racks" in text and "any standard Opentrons labware" in text and "reference/opentrons-labware/" in text
+    listed = DeckRules(labware=("opentrons_flex_*",)).describe()
+    assert "Labware you may load (anything else fails the check): opentrons_flex_*" in listed
 
 
 def test_good_protocol_reports_its_deck():

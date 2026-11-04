@@ -108,7 +108,7 @@ The assistant searches the `knowledge` folder by keyword while it designs:
 | `manuals\` | Kit manuals, IFUs (PDF, `.md`, `.txt`) | Drop files in, or import a URL |
 | `templates\` | Assay templates (`.md`, `.txt`) | Write them; two generic examples are included |
 | `protocols\` | Example protocols from other labs | Imported (below) |
-| `reference\` | The Opentrons Python API docs and official Flex examples | Imported (below) |
+| `reference\` | The Opentrons Python API docs, official Flex examples and every Opentrons labware definition | Imported (below) |
 | `experiments\` | The lab's own finished runs, one record each | Written automatically (below) |
 
 New files are searchable at once, with no restart. The assistant follows a kit manual's
@@ -121,6 +121,7 @@ Import from public sources, in this folder:
 ```powershell
 .\.venv\Scripts\python -m protocol_tool.knowledge_import opentrons-library    # ~800 protocols, Opentrons Protocol Library
 .\.venv\Scripts\python -m protocol_tool.knowledge_import opentrons-docs       # Python API docs + official Flex examples
+.\.venv\Scripts\python -m protocol_tool.knowledge_import opentrons-labware    # every Opentrons labware: load name, wells, depths
 .\.venv\Scripts\python -m protocol_tool.knowledge_import github owner/repo    # a lab's GitHub repo of Opentrons protocols
 .\.venv\Scripts\python -m protocol_tool.knowledge_import protocols-io "ELISA" "Bradford" --limit 25
 .\.venv\Scripts\python -m protocol_tool.knowledge_import url https://vendor.com/kit-manual.pdf
@@ -243,8 +244,10 @@ Copy `config.example.toml` to `config.toml`. The settings that matter most:
   accurate.
 - **Flex only, newest API.** Every protocol must be a Flex protocol at
   `[lab] api_level` (default `"latest"`: the newest level the installed
-  `opentrons` package supports) and may load only the labware in
-  `[lab] labware` (the lab's Flex labware; `*` wildcards allowed). OT-2 tip racks
+  `opentrons` package supports). By default it may load any standard Opentrons
+  labware, which the assistant looks up in `knowledgeeference\opentrons-labware\`
+  (refreshed on every start); list load names in `[lab] labware` (`*` wildcards
+  allowed) to allow only those. OT-2 tip racks
   always fail, and the simulator itself refuses OT-2 pipettes and modules. A
   protocol that breaks these rules fails its simulation, so it can't be sent,
   and designs checked under older rules are checked again when you review them.

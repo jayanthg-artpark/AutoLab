@@ -36,6 +36,8 @@ echo Checking for a newer Opentrons simulator...
 ".venv\Scripts\python" -m pip install --quiet --upgrade --disable-pip-version-check opentrons
 if errorlevel 1 echo Could not check for Opentrons updates ^(no internet?^); starting with the installed version.
 ".venv\Scripts\python" -c "import opentrons; print('Opentrons simulator', opentrons.__version__)"
+rem The assistant looks up labware in knowledge\reference\opentrons-labware; keep it in step with the simulator.
+".venv\Scripts\python" -m protocol_tool.knowledge_import opentrons-labware
 
 echo Starting the protocol tool at http://localhost:5500 - keep this window open; close it to stop.
 start "" cmd /c "timeout /t 4 >nul & start http://localhost:5500"

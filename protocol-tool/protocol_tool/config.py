@@ -21,15 +21,7 @@ DEFAULT_INVENTORY = """\
 - Fixtures: a waste chute in slot D3 (used tips go here) and a trash bin in slot A3"""
 
 
-DEFAULT_LABWARE = (
-    "opentrons_flex_*",  # Flex tip racks, filter tip racks and adapters
-    "corning_96_wellplate_360ul_flat",
-    "nest_96_wellplate_200ul_flat",
-    "nest_12_reservoir_15ml",
-    "nest_1_reservoir_195ml",
-    "opentrons_24_tuberack_eppendorf_1.5ml_safelock_snapcap",
-    "opentrons_15_tuberack_falcon_15ml_conical",
-)
+DEFAULT_LABWARE: tuple[str, ...] = ()  # any standard Opentrons labware (OT-2 tip racks still fail)
 
 
 @dataclass
@@ -92,7 +84,7 @@ class LabSettings:
     # opentrons package supports; the Flex's robot software must be at least as new.
     api_level: str = "latest"
     # Labware protocols may load (load names; * wildcards allowed). Everything else fails the
-    # simulation check. OT-2 tip racks always fail. Empty list = any Flex labware.
+    # simulation check. OT-2 tip racks always fail. Empty list (the default) = any standard Opentrons labware.
     labware: list[str] = field(default_factory=lambda: list(DEFAULT_LABWARE))
     # What the assistant may use on the Flex. Edit this to match the lab.
     inventory: str = DEFAULT_INVENTORY

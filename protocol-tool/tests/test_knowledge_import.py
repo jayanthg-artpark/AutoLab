@@ -9,7 +9,8 @@ import pytest
 
 from protocol_tool.knowledge import Knowledge
 from protocol_tool.knowledge_import import (
-    ImportProblem, import_github, import_opentrons_docs, import_opentrons_library, import_protocols_io, import_url,
+    ImportProblem, import_github, import_opentrons_docs, import_opentrons_labware, import_opentrons_library,
+    import_protocols_io, import_url,
 )
 
 quiet = lambda *_: None  # noqa: E731
@@ -66,6 +67,27 @@ def test_opentrons_docs(tmp_path):
     assert (tmp_path / "reference/opentrons-api/pipettes.md").read_text(encoding="utf-8").startswith("# Pipettes")
     example = (tmp_path / "reference/opentrons-api/example-dilution-tutorial-flex.md").read_text(encoding="utf-8")
     assert example.startswith("# Official example protocol: dilution_tutorial_flex (Flex)") and "robotType" in example
+
+
+
+def test_opentrons_labware(tmp_path):
+    (tmp_path / "reference/opentrons-labware").mkdir(parents=True)
+    (tmp_path / "reference/opentrons-labware/retired_labware.md").write_text("# gone", encoding="utf-8")
+
+    assert import_opentrons_labware(tmp_path, progress=quiet) > 100
+    folder = tmp_path / "reference/opentrons-labware"
+    rack = (folder / "opentrons_10_tuberack_falcon_4x50ml_6x15ml_conical.md").read_text(encoding="utf-8")
+    assert 'protocol.load_labware("opentrons_10_tuberack_falcon_4x50ml_6x15ml_conical"' in rack
+    assert "4 x Falcon 4x50 mL Conical in A3, B3, A4, B4: holds 50 mL" in rack
+    assert "well.meniscus(z=-3)" in rack  # deep tubes say how to aspirate below the surface
+    tips = (folder / "opentrons_flex_96_tiprack_50ul.md").read_text(encoding="utf-8")
+    assert "Tip length: 57.9 mm" in tips and "meniscus" not in tips
+    assert not (folder / "opentrons_96_tiprack_300ul.md").exists()  # OT-2 tips don't fit Flex pipettes
+    assert not (folder / "retired_labware.md").exists()
+    assert "- nest_96_wellplate_200ul_flat: NEST 96 Well Plate" in (folder / "index.md").read_text(encoding="utf-8")
+
+    hits = Knowledge(tmp_path).search("50 mL Falcon tube rack")
+    assert "reference/opentrons-labware/opentrons_6_tuberack_falcon_50ml_conical.md" in [p.doc for p, _ in hits]
 
 
 def test_protocols_io(tmp_path, monkeypatch):

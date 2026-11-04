@@ -14,6 +14,7 @@ Importing from public sources (run in the protocol-tool folder):
 
   .venv\Scripts\python -m protocol_tool.knowledge_import opentrons-library
   .venv\Scripts\python -m protocol_tool.knowledge_import opentrons-docs
+  .venv\Scripts\python -m protocol_tool.knowledge_import opentrons-labware
   .venv\Scripts\python -m protocol_tool.knowledge_import github owner/repo
   .venv\Scripts\python -m protocol_tool.knowledge_import protocols-io "ELISA" "Bradford" --limit 25
   .venv\Scripts\python -m protocol_tool.knowledge_import url https://vendor.com/kit-manual.pdf

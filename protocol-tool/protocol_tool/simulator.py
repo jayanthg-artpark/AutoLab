@@ -144,11 +144,18 @@ class DeckRules:
         lines.append(
             "- Flex hardware only: Flex pipettes (flex_1channel_50, flex_1channel_1000, flex_8channel_50, flex_8channel_1000, "
             "flex_96channel_1000), Flex tip racks (opentrons_flex_96_tiprack_50ul / _200ul / _1000ul, or the "
-            "opentrons_flex_96_filtertiprack_ versions) and Flex-compatible modules. Never OT-2 labware, tip racks, "
+            "opentrons_flex_96_filtertiprack_ versions) and Flex-compatible modules. Never OT-2 tip racks, "
             "pipettes or modules, and use Flex deck coordinates (A1-D4), not OT-2 slot numbers."
         )
         if self.labware:
             lines.append(f"- Labware you may load (anything else fails the check): {', '.join(self.labware)}.")
+        else:
+            lines.append(
+                "- Labware: any standard Opentrons labware. Every definition, with its exact load name, wells, volumes and "
+                "depths, is in the knowledge under reference/opentrons-labware/ (search_knowledge, e.g. \"50 mL Falcon tube "
+                "rack\"). Load what the scientist says is on the deck, or the lab's stock labware when they don't say; never "
+                "load a different labware as a stand-in (a 15 mL tube rack for 50 mL tubes puts the pipette in the wrong place)."
+            )
         if self.pipettes:
             lines.append("- Pipettes on the robot (load exactly these, on these mounts; nothing else): "
                          + ", ".join(f'protocol.load_instrument("{p}", "{m}")' for m, p in self.pipettes) + ".")

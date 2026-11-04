@@ -53,16 +53,10 @@ waste_chute_slot = "D3"   # fixed waste chute; "" if the deck has none
 # updated too (Opentrons App > the Flex > Robot Settings > update).
 api_level = "latest"
 # Labware protocols may load (load names, * wildcards). Anything else fails the simulation
-# check; OT-2 tip racks always fail. [] = any labware except OT-2 tip racks.
-labware = [
-  "opentrons_flex_*",   # Flex tip racks, filter tip racks and adapters
-  "corning_96_wellplate_360ul_flat",
-  "nest_96_wellplate_200ul_flat",
-  "nest_12_reservoir_15ml",
-  "nest_1_reservoir_195ml",
-  "opentrons_24_tuberack_eppendorf_1.5ml_safelock_snapcap",
-  "opentrons_15_tuberack_falcon_15ml_conical",
-]
+# check; OT-2 tip racks always fail. [] = any standard Opentrons labware except OT-2 tip racks:
+# the assistant looks them up in knowledge/reference/opentrons-labware/ (see knowledge/README.txt).
+# To restrict it, list load names, e.g. ["opentrons_flex_*", "nest_96_wellplate_200ul_flat"].
+labware = []
 # What the assistant may use on the Flex. Edit to match your lab exactly: it only
 # designs with what is listed here.
 inventory = """
