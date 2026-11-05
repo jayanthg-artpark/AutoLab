@@ -1,7 +1,7 @@
 // Protocol tool: wires the chat, workflow, deck, plate reader, review and runs views together.
 
 import { api, ApiError } from "./api.js";
-import { $, h, icon } from "./dom.js";
+import { $, h, icon, formatTime } from "./dom.js";
 import { createChat } from "./chat.js";
 import { renderDeck, setDeckRules } from "./deck.js";
 import { createReader } from "./reader.js";
@@ -118,17 +118,81 @@ async function newSession() {
   return created;
 }
 
+function showSession(next) {
+  store.set(SESSION_KEY, next.id);
+  applySession(next);
+  chat.render(session);
+  $("send-form").elements.name.dataset.touched = "";
+  $("send-ok").hidden = true;
+}
+
 $("new-design").addEventListener("click", async () => {
-  if (session?.transcript.length && !confirm("Start a new design? The current conversation and protocols will be put aside.")) return;
+  if (session?.transcript.length && !confirm("Start a new design? This one stays saved: reopen it any time from Designs.")) return;
   try {
-    applySession(await newSession());
-    chat.render(session);
-    $("send-form").elements.name.dataset.touched = "";
-    $("send-ok").hidden = true;
+    showSession(await newSession());
   } catch (err) {
     alert(err.message);
   }
 });
+
+// --- Saved designs: reopen any design and carry on with its conversation ------------------
+
+let savedDesigns = [];
+
+$("open-designs").addEventListener("click", async () => {
+  $("designs-filter").value = "";
+  $("design-list").replaceChildren(h("li", { class: "muted small" }, "Loading…"));
+  $("designs-dialog").showModal();
+  try {
+    savedDesigns = await api("/api/sessions");
+    renderDesignList();
+  } catch (err) {
+    $("design-list").replaceChildren(h("li", { class: "msg-error" }, `Could not load the saved designs: ${err.message}`));
+  }
+});
+
+$("designs-filter").addEventListener("input", renderDesignList);
+
+function renderDesignList() {
+  const words = $("designs-filter").value.toLowerCase().split(/\s+/).filter(Boolean);
+  const shown = savedDesigns.filter((d) => words.every((w) => `${d.title} ${d.first_message}`.toLowerCase().includes(w)));
+  if (!shown.length) {
+    $("design-list").replaceChildren(h("li", { class: "muted small" }, savedDesigns.length ? "No design matches." : "No saved designs yet."));
+    return;
+  }
+  $("design-list").replaceChildren(...shown.map((d) => {
+    const current = d.id === session?.id;
+    const facts = [
+      `Updated ${formatTime(d.updated_at)}`,
+      `${d.messages} message${d.messages === 1 ? "" : "s"}`,
+      d.protocols ? `${d.protocols} protocol${d.protocols === 1 ? "" : "s"}` : null,
+      d.runs ? `sent as ${d.runs} run${d.runs === 1 ? "" : "s"}` : null,
+    ].filter(Boolean).join(" · ");
+    return h("li", {},
+      h("button", { type: "button", class: `design-item${current ? " current" : ""}`, onclick: () => openSaved(d) },
+        h("span", { class: "design-title" }, d.title || "Untitled design",
+          current ? h("span", { class: "design-tag" }, "Open now") : null,
+          d.busy ? h("span", { class: "design-tag" }, "Assistant replying") : null),
+        d.first_message && d.first_message !== d.title ? h("span", { class: "design-first muted small" }, d.first_message) : null,
+        h("span", { class: "muted small" }, facts),
+      ),
+    );
+  }));
+}
+
+async function openSaved(d) {
+  if (d.id === session?.id) {
+    $("designs-dialog").close();
+    return;
+  }
+  try {
+    showSession(await api(`/api/sessions/${encodeURIComponent(d.id)}`));
+    $("designs-dialog").close();
+    showTab("design");
+  } catch (err) {
+    alert(`Could not open that design: ${err.message}`);
+  }
+}
 
 // --- Review and send ----------------------------------------------------------------------
 

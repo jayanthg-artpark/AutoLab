@@ -11,6 +11,7 @@ import json
 import sqlite3
 import threading
 from collections import OrderedDict
+from typing import Any
 
 from .models import Session, utcnow
 
@@ -83,6 +84,35 @@ class SessionStore:
         session = Session.model_validate_json(row[0])
         self._remember(session)
         return session
+
+    def designs(self, limit: int = 200) -> list[dict[str, Any]]:
+        """Saved designs with a conversation, most recently changed first, for reopening one."""
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT doc FROM sessions ORDER BY updated_at DESC LIMIT ?", (limit * 2,)
+            ).fetchall()
+        found = []
+        for (doc,) in rows:
+            data = json.loads(doc)
+            transcript = data.get("transcript") or []
+            if not transcript:
+                continue  # opened and never used
+            design = data.get("design") or {}
+            first = next((e.get("text", "") for e in transcript if e.get("role") == "user"), "")
+            title = design.get("title") or (design.get("requirements") or {}).get("assay") or first
+            found.append({
+                "id": data["id"],
+                "title": " ".join(title.split())[:120],
+                "first_message": " ".join(first.split())[:200],
+                "created_at": data.get("created_at"),
+                "updated_at": data.get("updated_at"),
+                "messages": len(transcript),
+                "protocols": len(design.get("protocols") or []),
+                "runs": len(data.get("submitted_runs") or []),
+            })
+            if len(found) == limit:
+                break
+        return found
 
     def run_note(self, run_id: str) -> dict[str, str] | None:
         with self._lock:

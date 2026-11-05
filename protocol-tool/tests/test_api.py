@@ -283,3 +283,21 @@ def test_slow_replies_send_keep_alives(settings, monkeypatch):
         response = client.post(f"/api/sessions/{sid}/chat", data={"message": "hi"})
         assert ": keep-alive" in response.text
         assert read_events(response)[-1]["type"] == "done"
+
+
+def test_saved_designs_can_be_reopened(settings):
+    client, _ = make_client(settings, [("Noted.", [], "end_turn"), ("Carrying on.", [], "end_turn")])
+    with client:
+        used = client.post("/api/sessions").json()["id"]
+        read_events(client.post(f"/api/sessions/{used}/chat", data={"message": "Bradford assay  with BSA standards"}))
+        client.post("/api/sessions")  # a new design, never used: not listed
+
+        designs = client.get("/api/sessions").json()
+        assert [d["id"] for d in designs] == [used]
+        assert designs[0]["title"] == designs[0]["first_message"] == "Bradford assay with BSA standards"
+        assert designs[0]["messages"] == 2 and designs[0]["busy"] is False
+
+        # Reopened later, the conversation carries on where it left off.
+        done = read_events(client.post(f"/api/sessions/{used}/chat", data={"message": "Add a blank"}))[-1]
+        assert [e["text"] for e in done["session"]["transcript"]] == [
+            "Bradford assay  with BSA standards", "Noted.", "Add a blank", "Carrying on."]

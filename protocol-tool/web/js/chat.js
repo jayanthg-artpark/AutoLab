@@ -42,6 +42,7 @@ export function createChat({ getSession, onSession, onBusyChange }) {
     $("send-chat").disabled = value;
     $("attach-btn").disabled = value;
     $("new-design").disabled = value;
+    $("open-designs").disabled = value;
     onBusyChange(value);
   }
 

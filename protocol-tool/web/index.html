@@ -38,7 +38,10 @@
           <h2>Design with <span class="assistant-name">AI</span></h2>
           <p class="muted small">Describe the experiment or attach a protocol PDF. <span class="assistant-name">The assistant</span> plans the workflow and writes and simulates the Flex protocols.</p>
         </div>
-        <button type="button" class="btn ghost small" id="new-design">New design</button>
+        <div class="head-actions">
+          <button type="button" class="btn ghost small" id="open-designs" title="Reopen a saved design and carry on with its conversation">Designs</button>
+          <button type="button" class="btn ghost small" id="new-design">New design</button>
+        </div>
       </div>
       <div class="notice" id="claude-banner" role="alert" hidden>
         <div><strong><span class="assistant-name">The AI model</span> isn't connected.</strong> <span id="claude-banner-text"></span></div>
@@ -278,6 +281,16 @@
       </div>
     </div>
     <pre class="code" id="code-view"></pre>
+  </dialog>
+
+  <dialog id="designs-dialog" class="wide-dialog" aria-labelledby="designs-title">
+    <div class="dialog-head">
+      <h2 id="designs-title">Saved designs</h2>
+      <button type="button" class="btn ghost small" data-close>Close</button>
+    </div>
+    <p class="muted small">Every design is saved with its conversation. Open one to carry on where it left off.</p>
+    <input type="search" id="designs-filter" class="designs-filter" placeholder="Search by title or first message" aria-label="Search saved designs">
+    <ul class="design-list" id="design-list"></ul>
   </dialog>
 
   <dialog id="steps-dialog" class="wide-dialog" aria-labelledby="steps-title">

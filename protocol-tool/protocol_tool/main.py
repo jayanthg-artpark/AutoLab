@@ -170,6 +170,11 @@ def create_app(
         store.save(session)
         return session.view()
 
+    @app.get("/api/sessions")
+    async def list_designs() -> list[dict[str, Any]]:
+        """Every saved design with a conversation, newest first, so anyone can reopen and continue one."""
+        return [{**d, "busy": assistant.is_busy(d["id"])} for d in await asyncio.to_thread(store.designs)]
+
     @app.get("/api/sessions/{session_id}")
     async def read_session(session_id: str) -> dict[str, Any]:
         return get_session(session_id).view()
