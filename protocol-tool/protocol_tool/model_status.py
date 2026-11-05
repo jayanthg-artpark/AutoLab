@@ -229,9 +229,13 @@ class OpenAICompatChecker(ModelChecker):
         if response.is_error:
             return "error", f"{p.label} answered {response.status_code}: {response.text[:200]}"
         try:
-            ids = [str(m.get("id", "")) for m in response.json().get("data", [])]
+            data = response.json().get("data", [])
+            ids = [str(m.get("id", "")) for m in data]
         except (ValueError, AttributeError):
             return "ready", f"{p.model} via {p.url}"
+        if len(data) == 1 and data[0].get("owned_by") == "llamacpp":
+            # A llama.cpp server lists its one model by file path and answers to any model name.
+            return "ready", f"{p.model} is available"
         if not model_listed(p.model, ids):
             options = [i.removeprefix("models/") for i in ids if p.name != "gemini" or "gemini" in i][:8]
             hint = f"Available: {', '.join(options)}." if options else ""
