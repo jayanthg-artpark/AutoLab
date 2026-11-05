@@ -8,6 +8,7 @@ settings) is not overwritten when the chat turn saves.
 from __future__ import annotations
 
 import json
+import re
 import sqlite3
 import threading
 from collections import OrderedDict
@@ -99,7 +100,10 @@ class SessionStore:
                 continue  # opened and never used
             design = data.get("design") or {}
             first = next((e.get("text", "") for e in transcript if e.get("role") == "user"), "")
-            title = design.get("title") or (design.get("requirements") or {}).get("assay") or first
+            assay = (design.get("requirements") or {}).get("assay") or ""
+            if re.match(r"(not (yet )?(specified|known|given)|unknown|tbd|n/?a)\b", assay.strip(), re.IGNORECASE):
+                assay = ""  # the model's placeholder until the scientist says
+            title = design.get("title") or assay or first
             found.append({
                 "id": data["id"],
                 "title": " ".join(title.split())[:120],
