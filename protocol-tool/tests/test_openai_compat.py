@@ -167,6 +167,23 @@ def test_busy_model_rests_for_the_rest_of_the_design(monkeypatch):
     assert api.requests[-1]["model"] == "gemini-flash-latest"
 
 
+def test_a_model_that_hangs_counts_as_busy(monkeypatch):
+    monkeypatch.setattr("protocol_tool.openai_compat.FIRST_ANSWER_S", 0.2)
+    requests = []
+
+    async def api(request: httpx.Request) -> httpx.Response:
+        model = json.loads(request.content)["model"]
+        requests.append(model)
+        if model == "gemini-flash-latest":
+            await asyncio.sleep(30)  # busy, and never says so
+        return httpx.Response(200, content=OK, headers={"content-type": "text/event-stream"})
+
+    model = OpenAICompatModel(GEMINI, httpx.MockTransport(api))
+    assert collect(model)[-1].content == [{"type": "text", "text": "ok"}]
+    assert requests == ["gemini-flash-latest", "gemini-3.5-flash"]
+    assert model.active_model == "gemini-3.5-flash"  # it rests like a model that answered 503
+
+
 def test_all_models_busy_gives_a_clear_error():
     api = FakeChatAPI(*[(503, OVERLOADED)] * 4)  # three models; only the last is retried
     with pytest.raises(ModelError, match="overloaded right now"):

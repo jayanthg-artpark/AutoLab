@@ -38,6 +38,9 @@ RATE_LIMIT_WAITS = 3
 # 10-20 s before it answers 503, so a busy model rests long enough to cover a whole design.
 REST_OVERLOADED_S = 600.0
 REST_NOT_FOUND_S = 3600.0
+# A busy Gemini model sometimes hangs instead of answering 503. When another model can take
+# over, one that sends nothing this long counts as busy (thinking first takes well under this).
+FIRST_ANSWER_S = 45.0
 _pdf_cache: dict[str, str] = {}
 
 
@@ -96,7 +99,11 @@ class OpenAICompatModel:
             for attempt in range(RATE_LIMIT_WAITS + 1):
                 chunks = self._post(body, retry_overloaded=is_last)
                 try:
-                    first = await anext(chunks, None)  # sends the request; raises on HTTP errors
+                    # Sends the request; raises on HTTP errors.
+                    first = await (anext(chunks, None) if is_last else asyncio.wait_for(anext(chunks, None), FIRST_ANSWER_S))
+                except TimeoutError:
+                    await chunks.aclose()
+                    last_error = Overloaded(f"{p.label} {model} sent nothing for {FIRST_ANSWER_S:.0f} s")
                 except RateLimited as exc:
                     wait = exc.retry_after if exc.retry_after is not None else min(5.0 * 2**attempt, 30.0)
                     can_wait = self._max_wait_s > 0 and attempt < RATE_LIMIT_WAITS and waited + wait <= self._max_wait_s
