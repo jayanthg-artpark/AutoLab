@@ -1,10 +1,10 @@
 """Fills the knowledge folder from public sources, so the assistant can learn from other labs.
 
   python -m protocol_tool.knowledge_import opentrons-library
-      Every protocol in the Opentrons Protocol Library (github.com/Opentrons/Protocols):
+      Every Flex protocol in the Opentrons Protocol Library (github.com/Opentrons/Protocols):
       description, default parameters and code -> knowledge/protocols/opentrons-library/
   python -m protocol_tool.knowledge_import opentrons-docs
-      The Opentrons Python API documentation (Flex and OT-2, Apache-2.0)
+      The Opentrons Python API documentation for the Flex (Apache-2.0)
       -> knowledge/reference/opentrons-api/
   python -m protocol_tool.knowledge_import opentrons-labware
       Every standard Opentrons labware definition (plates, tube racks, reservoirs, Flex tip racks,
@@ -14,14 +14,15 @@
       Public protocols on protocols.io matching each search (CC BY 4.0; needs a free token,
       PROTOCOLS_IO_TOKEN in .env) -> knowledge/protocols/protocols-io/
   python -m protocol_tool.knowledge_import github owner/repo [owner/repo ...]
-      Every Opentrons protocol in another lab's public GitHub repository, with the repository's
+      Every Flex protocol in another lab's public GitHub repository, with the repository's
       license -> knowledge/protocols/github/
   python -m protocol_tool.knowledge_import url https://example.com/kit-manual.pdf [--folder manuals]
       Any document on the web (kit manual, IFU, paper; PDF, HTML or text).
 
 Each imported document records its source, authors and terms (in the document and in
 knowledge/sources.json), so the assistant can cite it. Running an import again
-refreshes it. Downloads are only read as text, never run.
+refreshes it. Downloads are only read as text, never run. The lab has only a Flex, so
+protocols written for other robots, and the parts of the docs about them, are left out.
 """
 
 from __future__ import annotations
@@ -67,6 +68,16 @@ LIBRARY_TERMS = (
 )
 DOCS_LICENSE = "Apache-2.0 (Opentrons)"
 PROTOCOLS_IO_LICENSE = "CC BY 4.0 (protocols.io public content): cite the authors and DOI"
+
+# The lab has only a Flex: anything about the other Opentrons robot is left out of the knowledge.
+OTHER_ROBOT = re.compile(r"\bOT-?2\b", re.IGNORECASE)
+# Pipettes, tip racks and modules only the other robot uses, as they appear in code and tables.
+OTHER_ROBOT_HARDWARE = re.compile(
+    r"\bp(10|20|50|300|1000)_(single|multi)(_gen[12])?\b|\bopentrons_96_(filter)?tiprack_\d|\bmagdeck\b"
+    r"|\bmagnetic module( gen[12])?\b|\btemperature module gen1\b|\bthermocycler module gen1\b", re.IGNORECASE)
+FLEX_CODE = re.compile(r"""["']robotType["']\s*:\s*["']Flex["']""")
+# API docs pages only about hardware the Flex can't use.
+OTHER_ROBOT_PAGES = {"adapting-ot2-flex", "modules-magnetic-module", "reference-magnetic-module"}
 
 
 class ImportProblem(Exception):
@@ -144,23 +155,26 @@ def _library_from_zip(root: Path, z: zipfile.ZipFile, progress: Callable[[str], 
     sources = Sources(root)
     target = root / "protocols" / "opentrons-library"
     count = 0
+    for old in target.glob("*.md"):  # refreshed below; protocols for other robots stay out
+        old.unlink()
+        sources.entries.pop(f"protocols/opentrons-library/{old.name}", None)
     for name, files in sorted(folders.items()):
-        code_name = next((f for f in files if f.endswith(".ot2.apiv2.py") or f.endswith(".flex.py") or f.endswith(".apiv2.py")), None)
+        code_name = next((f for f in files if f.endswith(".flex.py") or f.endswith(".apiv2.py")), None)
         if code_name is None or ".hide-from-search" in files or "README.md" not in files:
             continue  # API v1 only, hidden from the library, or undocumented
         readme = z.read(files["README.md"]).decode("utf-8", errors="replace").strip()
         code = z.read(files[code_name]).decode("utf-8", errors="replace")
+        if ".flex." not in code_name and not FLEX_CODE.search(code):
+            continue  # written for another robot
         if len(code) > MAX_CODE_CHARS:
             code = code[:MAX_CODE_CHARS] + "\n# ... (cut: longer than the knowledge import keeps)"
         title = next((line.lstrip("#").strip() for line in readme.splitlines() if line.startswith("#")), name)
         url = f"https://library.opentrons.com/p/{name}"
-        robot = "Flex" if ".flex." in code_name or '"robotType": "Flex"' in code else "OT-2"
         parts = [
             f"# {title}",
             "",
             f"Source: Opentrons Protocol Library, {url}",
-            f"Robot: {robot}, Opentrons Python API v2"
-            + (". Written for the OT-2: on the Flex use Flex pipettes, tip racks, labware and deck slots (A1-D4)." if robot == "OT-2" else "."),
+            "Robot: Flex, Opentrons Python API v2.",
             f"Terms: {LIBRARY_TERMS}",
             "",
             readme,
@@ -172,12 +186,12 @@ def _library_from_zip(root: Path, z: zipfile.ZipFile, progress: Callable[[str], 
         parts += ["", f"## Protocol code ({code_name})", "```python", code.rstrip(), "```", ""]
         doc_id = f"protocols/opentrons-library/{slugify(name)}.md"
         _write(root, doc_id, "\n".join(parts))
-        sources.add(doc_id, source="Opentrons Protocol Library", url=url, license=LIBRARY_TERMS, robot=robot)
+        sources.add(doc_id, source="Opentrons Protocol Library", url=url, license=LIBRARY_TERMS, robot="Flex")
         count += 1
         if count % 200 == 0:
             progress(f"  {count} protocols written")
     sources.save()
-    progress(f"Imported {count} protocols into {target}")
+    progress(f"Imported {count} Flex protocols into {target}")
     return count
 
 
@@ -191,6 +205,7 @@ def import_opentrons_docs(root: Path, *, transport: httpx.BaseTransport | None =
     if token := os.environ.get("GITHUB_TOKEN"):
         headers["Authorization"] = f"Bearer {token}"
     sources = Sources(root)
+    folder = root / "reference" / "opentrons-api"
     count = 0
     progress("Downloading the Opentrons Python API documentation (github.com/Opentrons/opentrons)...")
     with _client(60, transport, headers) as client:
@@ -203,18 +218,28 @@ def import_opentrons_docs(root: Path, *, transport: httpx.BaseTransport | None =
         examples = [p for p in paths if p.startswith(OPENTRONS_EXAMPLES_DIR) and p.endswith(".py")]
         if not pages:
             raise ImportProblem(f"No documentation found under {OPENTRONS_DOCS_DIR}; the Opentrons repository layout has changed")
+        for old in folder.glob("*.md"):  # refreshed below; pages only about other robots stay out
+            old.unlink()
+            sources.entries.pop(f"reference/opentrons-api/{old.name}", None)
         for path in pages + examples:
+            if path in examples and "flex" not in Path(path).stem:
+                continue  # an example for another robot
+            if slugify(path.removeprefix(OPENTRONS_DOCS_DIR).removesuffix(".md")) in OTHER_ROBOT_PAGES:
+                continue
             response = client.get(OPENTRONS_RAW + path)
             if response.is_error:
                 progress(f"  skipped {path}: {response.status_code}")
                 continue
             text = response.text
+            if path in examples and _other_robot_code(text):
+                continue  # uses the other robot's pipettes or tips
+            if path not in examples and not flex_only(_without_front_matter(text)).strip():
+                continue  # nothing about the Flex
             if path in examples:
                 name = Path(path).stem
                 url = f"https://github.com/Opentrons/opentrons/blob/edge/{path}"
-                robot = "Flex" if "flex" in name else "OT-2"
                 doc_id = f"reference/opentrons-api/example-{slugify(name)}.md"
-                body = [f"# Official example protocol: {name} ({robot})", "", f"Source: {url}", f"License: {DOCS_LICENSE}", "",
+                body = [f"# Official example protocol: {name} (Flex)", "", f"Source: {url}", f"License: {DOCS_LICENSE}", "",
                         "```python", text.rstrip(), "```", ""]
             else:
                 rel = path.removeprefix(OPENTRONS_DOCS_DIR).removesuffix(".md")
@@ -222,13 +247,63 @@ def import_opentrons_docs(root: Path, *, transport: httpx.BaseTransport | None =
                 title = _md_title(text) or rel
                 doc_id = f"reference/opentrons-api/{slugify(rel)}.md"
                 body = [f"# {title}", "", f"Source: Opentrons Python Protocol API documentation, {url}",
-                        f"License: {DOCS_LICENSE}", "", _without_front_matter(text).strip(), ""]
+                        f"License: {DOCS_LICENSE}", "", flex_only(_without_front_matter(text)).strip(), ""]
             _write(root, doc_id, "\n".join(body))
             sources.add(doc_id, source="Opentrons Python API docs", url=url, license=DOCS_LICENSE)
             count += 1
     sources.save()
-    progress(f"Imported {count} documentation pages and examples into {root / 'reference' / 'opentrons-api'}")
+    progress(f"Imported {count} documentation pages and examples into {folder}")
     return count
+
+
+def flex_only(markdown: str) -> str:
+    """The docs page without what is about the other Opentrons robot: its sections, tabs, list items,
+    code examples, table rows and the sentences that mention it."""
+    out: list[str] = []
+    code: list[str] | None = None  # an open code block, kept only if it is all Flex
+    skip_indent: int | None = None  # dropping the indented content of a tab or list item about the other robot
+    skip_level = 0  # dropping a section whose heading names the other robot
+    for line in markdown.splitlines():
+        stripped = line.strip()
+        indent = len(line) - len(line.lstrip())
+        if code is not None:
+            code.append(line)
+            if stripped.startswith(("```", "~~~")):
+                if not _other_robot_code("\n".join(code)):
+                    out.extend(code)
+                code = None
+            continue
+        if skip_indent is not None:
+            if not stripped or indent > skip_indent:
+                continue
+            skip_indent = None
+        heading = re.match(r"(#{1,6})\s", line)
+        if heading:
+            if skip_level and len(heading.group(1)) <= skip_level:
+                skip_level = 0
+            if OTHER_ROBOT.search(line):
+                skip_level = len(heading.group(1))
+        if skip_level:
+            continue
+        if stripped.startswith(("```", "~~~")):
+            code = [line]
+        elif stripped.startswith("|") and OTHER_ROBOT_HARDWARE.search(line):
+            continue  # a table row about the other robot's hardware
+        elif not OTHER_ROBOT.search(line):
+            out.append(line)
+        elif re.match(r'===\s+"|([-*+]|\d+\.)\s', stripped):
+            skip_indent = indent  # a tab or list item about the other robot, with what is indented under it
+        elif not stripped.startswith("|"):  # table rows about the other robot go
+            kept = [part for part in re.split(r"(?<=[.!?])\s+", stripped) if not OTHER_ROBOT.search(part)]
+            if kept:
+                out.append(line[:indent] + " ".join(kept))
+    if code and not _other_robot_code("\n".join(code)):
+        out.extend(code)
+    return re.sub(r"\n{3,}", "\n\n", "\n".join(out))
+
+
+def _other_robot_code(code: str) -> bool:
+    return bool(OTHER_ROBOT.search(code) or OTHER_ROBOT_HARDWARE.search(code))
 
 
 # --- Opentrons labware definitions --------------------------------------------------------------------
@@ -376,7 +451,7 @@ def import_opentrons_labware(root: Path, *, progress: Callable[[str], None] = pr
     for name, (version, schema) in sorted(latest.items()):
         d = load_definition(name, version, schema)
         category = d["metadata"]["displayCategory"]
-        # Fixed trash and test definitions aren't loaded with load_labware; OT-2 tip racks don't fit Flex pipettes.
+        # Fixed trash and test definitions aren't loaded with load_labware; only Flex tip racks fit Flex pipettes.
         if category not in LABWARE_CATEGORIES or name.startswith("schema3test") or (
                 d["parameters"].get("isTiprack") and not name.startswith("opentrons_flex_")):
             continue
@@ -454,22 +529,22 @@ def import_github(root: Path, repo: str, *, transport: httpx.BaseTransport | Non
             code = response.text
             if "opentrons" not in code or not re.search(r"^def run\(", code, re.MULTILINE):
                 continue  # not an Opentrons protocol
+            if not FLEX_CODE.search(code):
+                continue  # written for another robot
             if len(code) > MAX_CODE_CHARS:
                 code = code[:MAX_CODE_CHARS] + "\n# ... (cut: longer than the knowledge import keeps)"
             name_match = re.search(r"""["']protocolName["']\s*:\s*["'](.+?)["']""", code)
             title = name_match.group(1) if name_match else Path(path).stem.replace("_", " ")
-            robot = "Flex" if re.search(r"""["']robotType["']\s*:\s*["']Flex["']""", code) else "OT-2"
             url = f"https://github.com/{repo}/blob/{branch}/{path}"
             doc_id = f"protocols/github/{slugify(repo, 50)}/{slugify(path.removesuffix('.py'), 80)}.md"
             _write(root, doc_id, "\n".join([
-                f"# {title}", "", f"Source: {url}", f"Robot: {robot}, Opentrons Python API"
-                + (". Written for the OT-2: on the Flex use Flex pipettes, tip racks, labware and deck slots." if robot == "OT-2" else "."),
+                f"# {title}", "", f"Source: {url}", "Robot: Flex, Opentrons Python API.",
                 f"License: {license}", "", "```python", code.rstrip(), "```", "",
             ]))
-            sources.add(doc_id, source=f"github.com/{repo}", url=url, license=license, robot=robot)
+            sources.add(doc_id, source=f"github.com/{repo}", url=url, license=license, robot="Flex")
             count += 1
     sources.save()
-    progress(f"Imported {count} protocols from {repo}")
+    progress(f"Imported {count} Flex protocols from {repo}")
     return count
 
 

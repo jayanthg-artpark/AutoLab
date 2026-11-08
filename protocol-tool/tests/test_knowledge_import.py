@@ -20,8 +20,10 @@ def library_zip() -> bytes:
     buffer = io.BytesIO()
     with zipfile.ZipFile(buffer, "w") as z:
         z.writestr("Protocols-develop/protocols/bradford/README.md", "# Bradford Assay\n\n### Author\nOpentrons\n\n## Description\nBSA standards, read at 595 nm.")
-        z.writestr("Protocols-develop/protocols/bradford/bradford.ot2.apiv2.py", "def run(ctx):\n    p300 = ctx.load_instrument('p300_single_gen2', 'left')\n")
+        z.writestr("Protocols-develop/protocols/bradford/bradford.flex.py", "requirements = {'robotType': 'Flex'}\ndef run(ctx):\n    p = ctx.load_instrument('flex_1channel_1000', 'left')\n")
         z.writestr("Protocols-develop/protocols/bradford/fields.json", '[{"name": "samples", "default": 8}]')
+        z.writestr("Protocols-develop/protocols/elisa/README.md", "# ELISA")
+        z.writestr("Protocols-develop/protocols/elisa/elisa.ot2.apiv2.py", "def run(ctx):\n    p300 = ctx.load_instrument('p300_single_gen2', 'left')\n")
         z.writestr("Protocols-develop/protocols/old-v1/README.md", "# Old")
         z.writestr("Protocols-develop/protocols/old-v1/old-v1.ot2.py", "from opentrons import robot")
         z.writestr("Protocols-develop/protocols/draft/README.md", "# Draft")
@@ -31,24 +33,38 @@ def library_zip() -> bytes:
 
 
 def test_opentrons_library(tmp_path):
+    (tmp_path / "protocols/opentrons-library").mkdir(parents=True)
+    (tmp_path / "protocols/opentrons-library/old-ot2-protocol.md").write_text("# gone", encoding="utf-8")
     data = library_zip()
     count = import_opentrons_library(tmp_path, transport=httpx.MockTransport(lambda r: httpx.Response(200, content=data)), progress=quiet)
-    assert count == 1  # API v1 and hidden protocols are left out
+    assert count == 1  # protocols for other robots, API v1 and hidden protocols are left out
+    assert sorted(p.name for p in (tmp_path / "protocols/opentrons-library").iterdir()) == ["bradford.md"]
     doc = (tmp_path / "protocols/opentrons-library/bradford.md").read_text(encoding="utf-8")
     assert doc.startswith("# Bradford Assay\n\nSource: Opentrons Protocol Library, https://library.opentrons.com/p/bradford")
-    assert "Robot: OT-2" in doc and "on the Flex use Flex pipettes" in doc
-    assert '"default": 8' in doc and "p300_single_gen2" in doc
+    assert "Robot: Flex" in doc
+    assert '"default": 8' in doc and "flex_1channel_1000" in doc
 
     knowledge = Knowledge(tmp_path)
     assert knowledge.search("bradford 595")[0][0].doc == "protocols/opentrons-library/bradford.md"
     assert "1 example protocols under protocols/" in knowledge.describe()
-    assert json.loads((tmp_path / "sources.json").read_text(encoding="utf-8"))["protocols/opentrons-library/bradford.md"]["robot"] == "OT-2"
+    assert json.loads((tmp_path / "sources.json").read_text(encoding="utf-8"))["protocols/opentrons-library/bradford.md"]["robot"] == "Flex"
 
 
 def test_opentrons_docs(tmp_path):
     files = {
         "docs/python-api/docs/building-block-commands/liquids.md": "---\ntitle: Liquid Control\n---\n\naspirate() and dispense().",
-        "docs/python-api/docs/pipettes.md": "# Pipettes\n\nLoad a Flex pipette with load_instrument.",
+        "docs/python-api/docs/pipettes.md": (
+            "# Pipettes\n\nLoad a Flex pipette with load_instrument. On an OT-2, use a GEN2 pipette.\n\n"
+            '=== "Flex Pipettes"\n    flex_1channel_1000\n\n=== "OT-2 Pipettes"\n    p300_single_gen2\n\n'
+            "- **Flex:** requirements are required.\n- **OT-2:** requirements are optional.\n    ```python\n"
+            '    requirements = {"robotType": "OT-2"}\n    ```\n\n'
+            "| Pipette | Load name |\n|---|---|\n| Flex 1-Channel | `flex_1channel_1000` |\n| P300 | `p300_single_gen2` |\n\n"
+            "```python\ntips = protocol.load_labware('opentrons_96_tiprack_300ul', 1)\n```\n\n"
+            "## Loading OT-2 pipettes\n\nGEN2 pipettes.\n\n## Next\n\nDone."
+        ),
+        "docs/python-api/docs/adapting-ot2-flex.md": "# Adapting OT-2 protocols for Flex",
+        "docs/python-api/docs/modules/magnetic-module.md": "# Magnetic Module\n\n## OT-2 only\n\nThe Magnetic Module works on the OT-2.",
+        "api/docs/v2/example_protocols/dilution_tutorial.py": "metadata = {'apiLevel': '2.16'}\ndef run(protocol): pass",
         "docs/python-api/docs/img/deck.png": "",
         "api/docs/v2/example_protocols/dilution_tutorial_flex.py": "requirements = {'robotType': 'Flex'}\ndef run(protocol): pass",
         "app/README.md": "# not docs",
@@ -59,12 +75,22 @@ def test_opentrons_docs(tmp_path):
             return httpx.Response(200, json={"truncated": False, "tree": [{"path": p, "type": "blob"} for p in files]})
         return httpx.Response(200, text=files[request.url.path.removeprefix("/Opentrons/opentrons/edge/")])
 
+    (tmp_path / "reference/opentrons-api").mkdir(parents=True)
+    (tmp_path / "reference/opentrons-api/adapting-ot2-flex.md").write_text("# gone", encoding="utf-8")
     assert import_opentrons_docs(tmp_path, transport=httpx.MockTransport(github), progress=quiet) == 3
     page = (tmp_path / "reference/opentrons-api/building-block-commands-liquids.md").read_text(encoding="utf-8")
     assert page.startswith("# Liquid Control\n\nSource: Opentrons Python Protocol API documentation, "
                            "https://docs.opentrons.com/python-api/building-block-commands/liquids/")
     assert "Apache-2.0" in page and "title:" not in page
-    assert (tmp_path / "reference/opentrons-api/pipettes.md").read_text(encoding="utf-8").startswith("# Pipettes")
+    pipettes = (tmp_path / "reference/opentrons-api/pipettes.md").read_text(encoding="utf-8")
+    assert pipettes.startswith("# Pipettes")
+    assert "Load a Flex pipette with load_instrument." in pipettes and "flex_1channel_1000" in pipettes
+    assert "**Flex:** requirements are required." in pipettes and "## Next" in pipettes
+    for gone in ("OT-2", "GEN2", "gen2", "300ul", "robotType"):
+        assert gone not in pipettes, gone
+    # Pages and examples only about the other robot are left out.
+    assert sorted(p.name for p in (tmp_path / "reference/opentrons-api").iterdir()) == [
+        "building-block-commands-liquids.md", "example-dilution-tutorial-flex.md", "pipettes.md"]
     example = (tmp_path / "reference/opentrons-api/example-dilution-tutorial-flex.md").read_text(encoding="utf-8")
     assert example.startswith("# Official example protocol: dilution_tutorial_flex (Flex)") and "robotType" in example
 
@@ -83,7 +109,7 @@ def test_opentrons_labware(tmp_path):
     assert "measure_liquid_height" in (folder / "liquid-height.md").read_text(encoding="utf-8")
     tips = (folder / "opentrons_flex_96_tiprack_50ul.md").read_text(encoding="utf-8")
     assert "Tip length: 57.9 mm" in tips and "meniscus" not in tips
-    assert not (folder / "opentrons_96_tiprack_300ul.md").exists()  # OT-2 tips don't fit Flex pipettes
+    assert not (folder / "opentrons_96_tiprack_300ul.md").exists()  # only Flex tips fit Flex pipettes
     assert not (folder / "retired_labware.md").exists()
     assert "- nest_96_wellplate_200ul_flat: NEST 96 Well Plate" in (folder / "index.md").read_text(encoding="utf-8")
 

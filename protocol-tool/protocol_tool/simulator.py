@@ -150,8 +150,8 @@ class DeckRules:
         lines.append(
             "- Flex hardware only: Flex pipettes (flex_1channel_50, flex_1channel_1000, flex_8channel_50, flex_8channel_1000, "
             "flex_96channel_1000), Flex tip racks (opentrons_flex_96_tiprack_50ul / _200ul / _1000ul, or the "
-            "opentrons_flex_96_filtertiprack_ versions) and Flex-compatible modules. Never OT-2 tip racks, "
-            "pipettes or modules, and use Flex deck coordinates (A1-D4), not OT-2 slot numbers."
+            "opentrons_flex_96_filtertiprack_ versions) and Flex modules, in Flex deck coordinates (A1-D4), never "
+            "numbered slots."
         )
         if self.labware:
             lines.append(f"- Labware you may load (anything else fails the check): {', '.join(self.labware)}.")
@@ -180,8 +180,8 @@ class DeckRules:
 
 
 def flex_problems(analysis: dict[str, Any], commands: list[dict[str, Any]], rules: DeckRules) -> list[str]:
-    """What makes the protocol not a current Flex protocol: robot type, API level, OT-2 or unlisted labware.
-    (The simulator itself already refuses OT-2 pipettes and modules on a Flex.)"""
+    """What makes the protocol not a current Flex protocol: robot type, API level, non-Flex tip racks or
+    unlisted labware. (The simulator itself already refuses pipettes and modules a Flex can't use.)"""
     problems = []
     if analysis.get("robotType") and analysis["robotType"] != FLEX_ROBOT:
         problems.append('This lab runs protocols on the Opentrons Flex: declare requirements = {"robotType": "Flex", ...}.')
@@ -223,7 +223,7 @@ def flex_problems(analysis: dict[str, Any], commands: list[dict[str, Any]], rule
         seen.add(name)
         if (definition.get("parameters") or {}).get("isTiprack") and not name.startswith("opentrons_flex_"):
             problems.append(
-                f"{name} is an OT-2 tip rack. Use Flex tips: opentrons_flex_96_tiprack_50ul, _200ul or _1000ul "
+                f"{name} is not a Flex tip rack. Use Flex tips: opentrons_flex_96_tiprack_50ul, _200ul or _1000ul "
                 "(or the opentrons_flex_96_filtertiprack_ versions)."
             )
         elif rules.labware and not any(fnmatchcase(name, pattern) for pattern in rules.labware):
