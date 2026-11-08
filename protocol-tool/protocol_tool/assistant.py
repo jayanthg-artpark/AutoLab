@@ -93,7 +93,7 @@ def build_tools(rules: DeckRules) -> list[dict[str, Any]]:
                     "open_questions": text_list,
                     "sources": {**text_list, "description": "Knowledge documents used, e.g. 'manuals/il6-kit.pdf'"},
                 },
-                "required": ["assay"],
+                "required": ["title", "assay", "goal"],  # see write_protocol on why optional fields get lost
             },
         },
         {
@@ -141,7 +141,10 @@ def build_tools(rules: DeckRules) -> list[dict[str, Any]]:
                 "properties": {
                     "protocol_id": {
                         "type": "string",
-                        "description": "Short id, lowercase letters, digits, '-' or '_' (e.g. 'coat', 'dilution'). Reuse it to replace that protocol. Default 'main'.",
+                        "description": (
+                            "Short id, lowercase letters, digits, '-' or '_' (e.g. 'coat', 'dilution'). Reuse it to "
+                            "replace that protocol; a new id adds another protocol. Use 'main' when the design has only one."
+                        ),
                     },
                     "title": {"type": "string", "description": "Short title, e.g. 'BSA Bradford standard curve'"},
                     "summary": {"type": "string", "description": "One to three sentences on what the protocol does"},
@@ -155,7 +158,10 @@ def build_tools(rules: DeckRules) -> list[dict[str, Any]]:
                     },
                     "code": {"type": "string", "description": "The complete protocol file"},
                 },
-                "required": ["title", "summary", "plate_slot", "code"],
+                # protocol_id is required, though 'main' is a fine answer: some servers (llama.cpp) make a
+                # model write required fields first, and GLM then ended calls before reaching an optional
+                # protocol_id, so every protocol of a multi-step design overwrote 'main'.
+                "required": ["protocol_id", "title", "summary", "plate_slot", "code"],
             },
         },
         {
