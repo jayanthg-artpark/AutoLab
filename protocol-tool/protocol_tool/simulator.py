@@ -50,7 +50,8 @@ FLEX_ROBOT = "OT-3 Standard"  # how the analysis names the Flex
 DEEP_WELL_MM = 60
 # Bump when the checks or what a simulation reports change, so stored designs are simulated again
 # before they are sent. 2: aspirating from tubes at the liquid surface, and where liquid goes.
-CHECKS_VERSION = 2
+# 3: multi-channel pipettes only in plates and reservoirs. 4: tips reach only their length into tubes and wells.
+CHECKS_VERSION = 4
 
 # Pipette load names (what protocols write) -> the names the analysis and the robot report.
 PIPETTE_INTERNAL = {
@@ -165,11 +166,24 @@ class DeckRules:
         lines.append(
             f"- Aspirating from 15 and 50 mL tubes (wells deeper than {DEEP_WELL_MM} mm): always just below the liquid "
             "surface, never at the default 1 mm above the bottom or another fixed height (the check fails those). "
-            "Volume in the tube given: declare it once with tube.load_liquid(liquid, volume_ul) and aspirate at "
-            "tube.meniscus(z=-2, target=\"end\"); the robot follows the level down as it takes liquid. Volume not "
-            "given: pick up a fresh tip, pipette.measure_liquid_height(tube) (the Flex finds the surface coming down "
-            "from the top), then aspirate at tube.meniscus(z=-2, target=\"end\"). See "
+            "Declare the volume in each tube once with tube.load_liquid(liquid, volume_ul) and aspirate at "
+            "tube.meniscus(z=-2, target=\"end\"); the robot follows the level down as it takes liquid. If the scientist "
+            "didn't give the volume in a tube, ask for it: don't use measure_liquid_height there, because the level is "
+            "then unknown before the run and the reach check below can't pass. See "
             "reference/opentrons-labware/liquid-height.md."
+        )
+        lines.append(
+            f"- Reach: a tip reaches only its own length below the pipette (50 µL tips {TIP_REACH_MM[50]:g} mm, "
+            f"200 µL {TIP_REACH_MM[200]:g} mm, 1000 µL {TIP_REACH_MM[1000]:g} mm). Deeper than that below the top of the "
+            "tube or well, the pipette itself hits it, so the check fails any aspirate or dispense that goes deeper. "
+            "For 15 and 50 mL tubes use 1000 µL tips, plan for the liquid the tips can't reach at the bottom (the "
+            "level must stay within reach for the whole run; tell the scientist how much to put in), and dispense into "
+            "tubes near the top: tube.top(-5)."
+        )
+        lines.append(
+            "- Multi-channel pipettes (8- and 96-channel) only go into 96/384-well plates and reservoirs. Tubes (15/50 mL "
+            "Falcon, 1.5/2 mL) take a single-channel pipette: only one 8-channel nozzle fits over a tube and the others "
+            "hit the rack (the check fails it). Moving a tube's liquid into a reservoir first lets an 8-channel fill a plate."
         )
         if self.pipettes:
             lines.append("- Pipettes on the robot (load exactly these, on these mounts; nothing else): "
@@ -343,6 +357,7 @@ def parse_analysis(
     rules = rules or DeckRules()
     errors = [_error_text(e) for e in analysis.get("errors", [])] + deck_problems(deck, plate_slot, rules)
     errors += flex_problems(analysis, commands, rules) + tip_problems + deep_well_problems(commands)
+    errors += nozzle_problems(analysis, commands) + reach_problems(analysis, commands)
     if any("OutOfTips" in str(e) or "out of tips" in str(e).lower() for e in analysis.get("errors", [])):
         errors.append(_out_of_tips(tip_racks, deck_tips))
 
@@ -416,9 +431,184 @@ def deep_well_problems(commands: list[dict[str, Any]]) -> list[str]:
         f"The protocol aspirates from {where} (a {depth:g} mm deep tube) at a fixed height, so the tip goes deep into "
         "the liquid or, higher up, draws air. Aspirate just below the surface: if the scientist gave the volume in the "
         "tube, declare it once with tube.load_liquid(liquid, volume_ul) and aspirate at "
-        "tube.meniscus(z=-2, target=\"end\"); if not, pick up a fresh tip, call pipette.measure_liquid_height(tube) "
-        "(the Flex finds the surface coming down from the top) and aspirate at tube.meniscus(z=-2, target=\"end\")."
+        "tube.meniscus(z=-2, target=\"end\"); if not, ask the scientist how much is in the tube."
         for where, depth in fixed.items()
+    ]
+
+
+# How far each Flex tip reaches below the pipette (tip length less the part on the nozzle), as the analysis reports it.
+TIP_REACH_MM = {50: 47.8, 200: 48.6, 1000: 85.9}
+REACH_CLEARANCE_MM = 2.0  # the pipette must stay this far above the top of what it reaches into
+_ORIGIN_DEPTH = {"bottom": 0.0, "center": 0.5, "top": 1.0}  # well-location origins, as a fraction of the well depth
+
+
+def reach_problems(analysis: dict[str, Any], commands: list[dict[str, Any]]) -> list[str]:
+    """Aspirates and dispenses deeper below the top of a tube or well than the tip reaches, so the pipette
+    itself would hit it (and a partial-tip layout's other nozzles the labware). The analysis reports
+    where the tip ends up, following the tracked liquid level for aspirates at the meniscus."""
+    names = {p["id"]: p.get("pipetteName", "pipette") for p in analysis.get("pipettes", [])}
+    definitions: dict[str, dict[str, Any]] = {}
+    base: dict[str, float] = {}  # labware id -> height of the labware's bottom above the deck
+    for c in commands:
+        result, params = c.get("result") or {}, c.get("params") or {}
+        if c.get("commandType") == "loadLabware" and (result.get("definition") or {}).get("wells"):
+            definitions[result["labwareId"]] = result["definition"]
+            if {"slotName", "addressableAreaName"} & set(params.get("location") or {}):
+                base[result["labwareId"]] = 0.0  # straight on the deck
+    for c in commands:  # on a module or adapter: from a move to a known height in one of its wells
+        result, params = c.get("result") or {}, c.get("params") or {}
+        lw, location = params.get("labwareId", ""), params.get("wellLocation") or {}
+        if (lw in definitions and lw not in base and "z" in (result.get("position") or {})
+                and location.get("origin", "top") in _ORIGIN_DEPTH):
+            well = definitions[lw]["wells"].get(params.get("wellName", ""))
+            if well:
+                bottom = (result["position"]["z"] - (location.get("offset") or {}).get("z", 0)
+                          - _ORIGIN_DEPTH[location.get("origin", "top")] * well["depth"])
+                base[lw] = bottom - well["z"]
+
+    reach: dict[str, tuple[float, float]] = {}  # pipette -> (reach, tip volume) of the tip it holds
+    layouts: dict[str, dict[str, Any]] = {}
+    probed: set[tuple[str, str]] = set()
+    found: dict[tuple[str, str, str, bool, bool], dict[str, Any]] = {}
+    for c in commands:
+        kind, params, result = c.get("commandType"), c.get("params") or {}, c.get("result") or {}
+        pipette, lw, well_name = params.get("pipetteId", ""), params.get("labwareId", ""), params.get("wellName", "")
+        if kind == "pickUpTip" and result.get("tipLength"):
+            reach[pipette] = (float(result["tipLength"]), float(result.get("tipVolume") or 0))
+        elif kind == "configureNozzleLayout":
+            layouts[pipette] = params.get("configurationParams") or {}
+        elif kind in ("liquidProbe", "tryLiquidProbe"):
+            probed.add((lw, well_name))
+        if kind not in INTO_WELL or lw not in definitions or lw not in base or pipette not in reach:
+            continue
+        definition = definitions[lw]
+        well = definition["wells"].get(well_name)
+        z = (result.get("position") or {}).get("z")
+        if well is None or z is None or (definition.get("parameters") or {}).get("isTiprack"):
+            continue
+        channels = _channels(names.get(pipette, ""))
+        _, active = _active_nozzles(channels, layouts.get(pipette))
+        bare = len(active) < channels  # nozzles without tips hang over the labware at the pipette's height
+        top = base[lw] + (definition["dimensions"]["zDimension"] if bare else well["z"] + well["depth"])
+        tip_reach, tip_volume = reach[pipette]
+        if z + tip_reach >= top + REACH_CLEARANCE_MM - 1e-6:
+            continue
+        unknown = (lw, well_name) in probed and (params.get("wellLocation") or {}).get("origin") == "meniscus"
+        key = (names.get(pipette, "pipette"), definition["metadata"]["displayName"], kind, bare, unknown)
+        entry = found.setdefault(key, {"wells": [], "depth": 0.0, "reach": tip_reach, "tip": tip_volume})
+        if well_name not in entry["wells"]:
+            entry["wells"].append(well_name)
+        entry["depth"] = max(entry["depth"], top - z)
+
+    problems = []
+    for (pipette, name, kind, bare, unknown), e in found.items():
+        wells = f"{', '.join(e['wells'][:4])}{'...' if len(e['wells']) > 4 else ''}"
+        action = "aspirates" if kind.startswith("aspirate") else "dispenses" if kind.startswith("dispense") else "goes"
+        text = (f"The {_load_name(pipette)} {action} {e['depth']:.0f} mm below the top of {wells} of {name}, but its "
+                f"{e['tip']:g} µL tips reach only {e['reach']:.0f} mm, so the pipette "
+                f"{'and its nozzles without tips' if bare else 'itself'} would hit the {'labware' if bare else 'tube or well'}. ")
+        if unknown:
+            text += ("The level after measure_liquid_height isn't known before the run, so the check assumes the tube may "
+                     "be nearly empty: ask the scientist how much is in the tube and declare it with "
+                     "tube.load_liquid(liquid, volume_ul) instead.")
+        elif action == "dispenses":
+            text += "Dispense into it near the top instead: tube.top(-5)."
+        else:
+            text += ("Use longer tips (1000 µL tips reach 86 mm), or have more liquid in the tube so the level stays within "
+                     "reach for the whole run (tell the scientist the volume to put in), or move the liquid to a reservoir.")
+        problems.append(text)
+    return problems
+
+
+NOZZLE_PITCH_MM = 9.0
+HEAD_ROWS = "ABCDEFGH"
+# Commands that put the pipette's nozzles into a well (tip pickups and drops are in tip racks, which fit any head).
+INTO_WELL = ("aspirate", "aspirateWhileTracking", "dispense", "dispenseWhileTracking", "blowout", "touchTip",
+             "moveToWell", "liquidProbe", "tryLiquidProbe", "mix")
+
+
+def _nozzle(name: str) -> tuple[int, int]:
+    return HEAD_ROWS.index(name[0]), int(name[1:]) - 1
+
+
+def _active_nozzles(channels: int, config: dict[str, Any] | None) -> tuple[tuple[int, int], list[tuple[int, int]]]:
+    """(primary nozzle, active nozzles) as (row, column) on the head, from a configureNozzleLayout's params."""
+    rows, cols = {1: (1, 1), 8: (8, 1)}.get(channels, (8, 12))
+    grid = [(r, c) for r in range(rows) for c in range(cols)]
+    config = config or {}
+    primary = _nozzle(config.get("primaryNozzle") or "A1")
+    style = (config.get("style") or "ALL").upper()
+    if style == "SINGLE":
+        return primary, [primary]
+    if config.get("backLeftNozzle") and config.get("frontRightNozzle"):
+        (r0, c0), (r1, c1) = _nozzle(config["backLeftNozzle"]), _nozzle(config["frontRightNozzle"])
+        return primary, [(r, c) for r, c in grid if r0 <= r <= r1 and c0 <= c <= c1]
+    if style == "COLUMN":
+        return primary, [(r, c) for r, c in grid if c == primary[1]]
+    if style == "ROW":
+        return primary, [(r, c) for r, c in grid if r == primary[0]]
+    return primary, grid
+
+
+def _well_at(definition: dict[str, Any], x: float, y: float) -> str | None:
+    """The well whose opening contains the point (labware coordinates), if any."""
+    for name, w in definition["wells"].items():
+        dx, dy = x - w["x"], y - w["y"]
+        if w.get("shape") == "circular":
+            if dx * dx + dy * dy <= (w["diameter"] / 2) ** 2 + 1e-6:
+                return name
+        elif abs(dx) <= w.get("xDimension", 0) / 2 + 1e-6 and abs(dy) <= w.get("yDimension", 0) / 2 + 1e-6:
+            return name
+    return None
+
+
+def nozzle_problems(analysis: dict[str, Any], commands: list[dict[str, Any]]) -> list[str]:
+    """A multi-channel head taken into labware its nozzles don't fit: an 8-channel in a tube rack puts
+    one nozzle over the tube and the others onto the rack (the simulator only checks this for partial
+    tip layouts). Every active nozzle must be over its own well, or share one trough of a reservoir
+    (labware the Flex centres a multi-channel head on)."""
+    pipettes = {p["id"]: p.get("pipetteName", "") for p in analysis.get("pipettes", [])}
+    definitions: dict[str, dict[str, Any]] = {}
+    layouts: dict[str, dict[str, Any]] = {}
+    found: dict[tuple[str, str], list[str]] = {}
+    for c in commands:
+        kind, params = c.get("commandType"), c.get("params") or {}
+        if kind == "loadLabware" and ((c.get("result") or {}).get("definition") or {}).get("wells"):
+            definitions[c["result"]["labwareId"]] = c["result"]["definition"]
+        elif kind == "configureNozzleLayout":
+            layouts[params.get("pipetteId", "")] = params.get("configurationParams") or {}
+        if kind not in INTO_WELL or params.get("labwareId") not in definitions:
+            continue
+        definition = definitions[params["labwareId"]]
+        well = definition["wells"].get(params.get("wellName", ""))
+        channels = _channels(pipettes.get(params.get("pipetteId", ""), ""))
+        if channels == 1 or well is None or (definition.get("parameters") or {}).get("isTiprack"):
+            continue
+        primary, active = _active_nozzles(channels, layouts.get(params.get("pipetteId", "")))
+        if len(active) < 2:
+            continue
+        centred = "centerMultichannelOnWells" in ((definition.get("parameters") or {}).get("quirks") or [])
+        if centred:  # the Flex puts the middle of the active nozzles over the well
+            rows, cols = [r for r, _ in active], [c for _, c in active]
+            ref = ((min(rows) + max(rows)) / 2, (min(cols) + max(cols)) / 2)
+        else:
+            ref = primary
+        offset = (params.get("wellLocation") or {}).get("offset") or {}
+        x0, y0 = well["x"] + offset.get("x", 0), well["y"] + offset.get("y", 0)
+        # Row A of the head is at the back (higher y), column 1 on the left.
+        under = [_well_at(definition, x0 + NOZZLE_PITCH_MM * (c - ref[1]), y0 - NOZZLE_PITCH_MM * (r - ref[0]))
+                 for r, c in active]
+        if None in under or (not centred and len(set(under)) < len(under)):
+            key = (pipettes.get(params["pipetteId"], "pipette"), definition["metadata"]["displayName"])
+            wells = found.setdefault(key, [])
+            if params["wellName"] not in wells:
+                wells.append(params["wellName"])
+    return [
+        f"The {_load_name(pipette)} goes into {', '.join(wells[:4])}{'...' if len(wells) > 4 else ''} of {name} with "
+        "several nozzles, but only one fits there: the others would hit the labware. Multi-channel pipettes only go "
+        "into 96/384-well plates and reservoirs. Take liquid from tubes with a single-channel pipette (flex_1channel_...); "
+        "if the robot has only a multi-channel, ask the scientist to move the liquid to a reservoir first."
+        for (pipette, name), wells in found.items()
     ]
 
 

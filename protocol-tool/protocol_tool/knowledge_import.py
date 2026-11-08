@@ -317,9 +317,10 @@ LIQUID_HEIGHT_NOTE = (
     "Liquid height: the robot knows the well's shape, not how full it is. Unless told otherwise it aspirates "
     "1 mm above the bottom, so in a deep tube or reservoir the tip, and even the pipette, goes deep into the liquid. "
     "Aspirate just below the surface instead: with the volume known, declare it with well.load_liquid(liquid, "
-    "volume_ul) and aspirate at well.meniscus(z=-2, target=\"end\"); with it unknown, pick up a fresh tip, call "
-    "pipette.measure_liquid_height(well) and aspirate at the same place. In 15 and 50 mL tubes this is required: "
-    "see reference/opentrons-labware/liquid-height.md."
+    "volume_ul) and aspirate at well.meniscus(z=-2, target=\"end\"). A tip reaches only its own length below the "
+    "pipette (1000 µL tips 86 mm, 50 and 200 µL tips 48 mm): deeper than that, the pipette itself hits the tube. In 15 "
+    "and 50 mL tubes declare the volume (ask the scientist if it wasn't given), keep the level within reach and "
+    "dispense near the top: see reference/opentrons-labware/liquid-height.md."
 )
 LIQUID_HEIGHT_PAGE = """\
 # Aspirating at the liquid surface: tubes, reservoirs and deep wells
@@ -360,22 +361,41 @@ target="end" aims at where the surface will be after this aspirate, so the tip i
 target="start" aims at the surface before it. Without load_liquid (or a measurement) the simulation fails with
 LiquidHeightUnknownError, so a missing volume is caught before the run.
 
+## How deep a tip reaches
+
+A tip reaches only its own length below the pipette: 1000 µL tips 86 mm, 200 µL tips 48.6 mm, 50 µL tips 47.8 mm.
+Deeper than that below the top of a tube or well, the pipette itself (and, with a partial tip layout, the nozzles
+without tips) hits the tube or the rack. A 50 or 15 mL Falcon tube is about 113 mm deep, so:
+
+- Take liquid from these tubes with 1000 µL tips. Even they don't reach the bottom 27 mm or so of a 50 mL tube,
+  so the tube needs liquid left over at the end of the run. Tell the scientist how much to put in.
+- 50 and 200 µL tips reach only the top 48 mm: the tube must stay nearly full.
+- Dispense into a tube near the top, tube.top(-5), never at the default 1 mm above the bottom.
+
+The simulation check follows the level as the protocol takes liquid and fails any aspirate or dispense that goes
+deeper than the tip reaches. It needs the volume in each tube for that, from load_liquid.
+
 ## Volume not known
 
-Let the Flex find the surface: measure_liquid_height() lowers a fresh tip from the top of the tube until its pressure
-sensor touches liquid, records the height, and the protocol aspirates from there. Pick up a new tip right before
-each measurement (a wet tip reads wrongly); the tip used to measure can then aspirate.
+In 15 and 50 mL tubes, ask the scientist for the volume. measure_liquid_height() finds the level only during the
+run, so the check can't show that the tip stays within reach, and fails.
+
+In plates and reservoirs, where any tip reaches the bottom, the Flex can find the surface itself:
+measure_liquid_height() lowers a fresh tip from the top of the well until its pressure sensor touches liquid,
+records the height, and the protocol aspirates from there. Pick up a new tip right before each measurement (a wet
+tip reads wrongly); the tip used to measure can then aspirate.
 
 ```python
 pipette.pick_up_tip()
-pipette.measure_liquid_height(tube)  # Flex 1-, 8- (A1 and H1 channels) and 96-channel pipettes
-pipette.aspirate(30, tube.meniscus(z=-2, target="end"))
+pipette.measure_liquid_height(reservoir["A1"])  # Flex 1-, 8- (A1 and H1 channels) and 96-channel pipettes
+pipette.aspirate(30, reservoir["A1"].meniscus(z=-2, target="end"))
 pipette.dispense(30, plate["A1"])
 pipette.drop_tip()
 ```
 
-After one measurement the robot keeps tracking the level for later aspirates from the same tube. If the tube is
-empty the Flex stops and asks for liquid (error recovery). In the simulation the measurement always succeeds.
+After one measurement the robot keeps tracking the level for later aspirates from the same well. If the well is
+empty the Flex stops and asks for liquid (error recovery). In the simulation the measurement always succeeds, and
+the level is taken to be at the bottom.
 
 ## Notes
 
@@ -384,7 +404,8 @@ empty the Flex stops and asks for liquid (error recovery). In the simulation the
 - Use z=-2 to z=-5: deep enough to stay in liquid while aspirating, shallow enough to keep the outside of the tip dry.
 - pipette.liquid_presence_detection = True only checks that there is liquid before each aspirate; it does not move the
   aspirate height. Use measure_liquid_height() for that.
-- Dispense into an empty plate as usual (1 mm above the bottom, or well.top(-1) for drops from above).
+- Dispense into an empty plate as usual (1 mm above the bottom, or well.top(-1) for drops from above). Into
+  tubes, dispense near the top: tube.top(-5).
 """
 
 

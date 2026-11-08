@@ -216,8 +216,10 @@ def test_tubes_are_aspirated_from_just_below_the_surface():
 
     known = falcon('    tube.load_liquid(protocol.define_liquid("Buffer"), 40000)\n'
                    '    pipette.aspirate(30, tube.meniscus(z=-2, target="end"))')
+    assert known.ok, known.errors
+    # A measured level isn't known before the run, so the tip can't be shown to stay within reach.
     sensed = falcon('    pipette.measure_liquid_height(tube)\n    pipette.aspirate(30, tube.meniscus(z=-2, target="end"))')
-    assert known.ok and sensed.ok, (known.errors, sensed.errors)
+    assert any("The level after measure_liquid_height isn't known before the run" in e for e in sensed.errors), sensed.errors
     assert not falcon('    pipette.aspirate(30, tube.meniscus(z=-2, target="end"))').ok  # no volume, no measurement
     assert "measure_liquid_height" in DeckRules().describe()
 
@@ -244,3 +246,96 @@ def test_a_deck_without_a_waste_chute_keeps_the_trash_bin():
     rules = DeckRules(waste_chute_slot="")
     assert 'load it with `protocol.load_trash_bin("A3")`' in rules.describe()
     assert not any("waste chute" in w for w in asyncio.run(simulate(GOOD_PROTOCOL, "D2", rules=rules)).warnings)
+
+
+HEAD = '''requirements = {"robotType": "Flex", "apiLevel": "%s"}
+from opentrons.protocol_api import SINGLE, PARTIAL_COLUMN
+def run(protocol):
+    protocol.load_waste_chute()
+    tips = protocol.load_labware("opentrons_flex_96_tiprack_50ul", "B2")
+    source = protocol.load_labware("LABWARE", "C2")
+    plate = protocol.load_labware("nest_96_wellplate_200ul_flat", "D1")
+    pipette = protocol.load_instrument("flex_8channel_50", "left", tip_racks=[tips])
+LAYOUT
+    pipette.pick_up_tip()
+    source["WELL"].load_liquid(protocol.define_liquid("Buffer"), 1000)
+    pipette.aspirate(10, source["WELL"].meniscus(z=-2, target="end"))
+    pipette.dispense(10, plate["DEST"])
+    pipette.drop_tip()
+''' % LATEST
+
+
+def eight_channel(labware: str, well: str = "A1", layout: str = ""):
+    dest = "H1" if layout else "A1"  # a partial layout's primary nozzle is H1, with the others behind it
+    code = HEAD.replace("LABWARE", labware).replace("WELL", well).replace("LAYOUT", layout).replace("DEST", dest)
+    return asyncio.run(simulate(code, "D1"))
+
+
+def test_a_multichannel_pipette_only_goes_into_plates_and_reservoirs():
+    for tubes, front in (("opentrons_6_tuberack_falcon_50ml_conical", "B1"),
+                         ("opentrons_15_tuberack_falcon_15ml_conical", "C1"),
+                         ("opentrons_24_tuberack_nest_1.5ml_snapcap", "D1")):
+        sim = eight_channel(tubes)
+        assert not sim.ok
+        assert any(e.startswith("The flex_8channel_50 goes into A1 of ") and "only one fits there" in e
+                   for e in sim.errors), (tubes, sim.errors)
+        # Four nozzles still don't fit a tube.
+        partial = eight_channel(tubes, front,
+                                '    pipette.configure_nozzle_layout(style=PARTIAL_COLUMN, start="H1", end="E1", tip_racks=[tips])')
+        assert [e for e in partial.errors if "only one fits there" in e and "Tube Rack" in e], (tubes, partial.errors)
+
+    single = eight_channel("opentrons_6_tuberack_falcon_50ml_conical",
+                           layout='    pipette.configure_nozzle_layout(style=SINGLE, start="H1", tip_racks=[tips])')
+    assert not any("only one fits there" in e for e in single.errors), single.errors
+
+    for fits in ("nest_12_reservoir_15ml", "nest_1_reservoir_195ml", "nest_96_wellplate_2ml_deep",
+                 "corning_384_wellplate_112ul_flat", "opentrons_96_wellplate_200ul_pcr_full_skirt"):
+        sim = eight_channel(fits)
+        assert sim.ok, (fits, sim.errors)
+    # A column that starts below row A runs off the plate.
+    assert any("only one fits there" in e for e in eight_channel("nest_96_wellplate_2ml_deep", "B1").errors)
+    assert "Multi-channel pipettes (8- and 96-channel) only go into" in DeckRules().describe()
+
+
+REACH = '''requirements = {"robotType": "Flex", "apiLevel": "%s"}
+from opentrons.protocol_api import SINGLE
+def run(protocol):
+    protocol.load_waste_chute()
+    tips = protocol.load_labware("opentrons_flex_96_tiprack_TIPSul", "C3")  # nothing behind it: a partial layout's other nozzles hang there
+    rack = protocol.load_labware("opentrons_6_tuberack_falcon_50ml_conical", "C2")
+    plate = protocol.load_labware("nest_96_wellplate_200ul_flat", "D1")
+    pipette = protocol.load_instrument("PIPETTE", "left", tip_racks=[tips])
+LAYOUT
+    rack["A1"].load_liquid(protocol.define_liquid("Buffer"), VOLUME)
+    pipette.pick_up_tip()
+    pipette.aspirate(30, rack["A1"].meniscus(z=-2, target="end"))
+    pipette.dispense(30, DEST)
+    pipette.drop_tip()
+''' % LATEST
+
+
+def reach(tips: int, volume: int, dest: str = 'plate["H1"]', pipette: str = "flex_1channel_1000", layout: str = ""):
+    code = (REACH.replace("TIPS", str(tips)).replace("VOLUME", str(volume)).replace("DEST", dest)
+            .replace("PIPETTE", pipette).replace("LAYOUT", layout))
+    return asyncio.run(simulate(code, "D1"))
+
+
+def test_tips_reach_only_their_length_into_a_tube():
+    assert reach(50, 40000).ok  # a full 50 mL tube: the surface is near the top
+    low = reach(50, 5000)  # 5 mL: the surface is about 98 mm down, a 50 uL tip reaches 48 mm
+    assert any(e.startswith("The flex_1channel_1000 aspirates ") and "50 µL tips reach only 48 mm, so the pipette itself "
+               "would hit the tube or well" in e for e in low.errors), low.errors
+    assert reach(1000, 20000).ok, reach(1000, 20000).errors  # 1000 uL tips reach 86 mm
+    assert not reach(1000, 3000).ok  # but not the bottom of a 50 mL tube
+
+    # Dispensing into a tube at the default height (1 mm above the bottom) puts the pipette into it.
+    into_tube = reach(1000, 40000, dest='rack["B1"]')
+    assert any("dispenses" in e and "tube.top(-5)" in e for e in into_tube.errors), into_tube.errors
+    assert reach(1000, 40000, dest='rack["B1"].top(-5)').ok
+
+    # An 8-channel using one nozzle: the nozzles without tips hang over the tube rack at the pipette's height.
+    single = '    pipette.configure_nozzle_layout(style=SINGLE, start="H1", tip_racks=[tips])'
+    assert reach(50, 40000, pipette="flex_8channel_50", layout=single).ok
+    deep = reach(50, 5000, pipette="flex_8channel_50", layout=single)
+    assert any("the pipette and its nozzles without tips would hit the labware" in e for e in deep.errors), deep.errors
+    assert "a tip reaches only its own length below the pipette (50 µL tips 47.8 mm" in DeckRules().describe()
