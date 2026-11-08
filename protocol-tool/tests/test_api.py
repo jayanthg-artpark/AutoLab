@@ -202,6 +202,10 @@ def test_runs_are_relayed_from_the_master_node(settings):
         assert client.get("/api/tips").json()["racks"][0]["remaining"] == 56
         assert [i["id"] for i in client.get("/api/instruments").json()["instruments"]] == ["thor", "flex", "tecan"]
         assert client.post("/api/transport/reset").json()["at_home"] is True
+        assert client.post("/api/instruments/tecan/access/open").json()["detail"].endswith("drawer opened")
+        assert client.post("/api/instruments/tecan/access/shake").status_code == 422
+        # Browsers must check for a newer page script instead of running an old copy.
+        assert client.get("/js/main.js").headers["cache-control"] == "no-cache"
 
 
 def test_explain_summarises_a_finished_run(settings):

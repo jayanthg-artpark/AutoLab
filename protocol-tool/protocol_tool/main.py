@@ -13,7 +13,7 @@ import secrets
 import time
 from contextlib import asynccontextmanager
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 import uvicorn
 from fastapi import FastAPI, File, Form, HTTPException, Request, Response, UploadFile
@@ -529,6 +529,10 @@ def create_app(
     async def reset_transport(request: Request) -> Response:
         return await relay(request, "POST", "/transport/reset")
 
+    @app.post("/api/instruments/{instrument_id}/access/{action}")
+    async def instrument_access(request: Request, instrument_id: str, action: Literal["open", "close"]) -> Response:
+        return await relay(request, "POST", f"/instruments/{instrument_id}/access/{action}")
+
     @app.get("/api/runs")
     async def runs(request: Request) -> Response:
         return await relay(request, "GET", "/runs")
@@ -565,8 +569,19 @@ def create_app(
     async def results_csv(request: Request, run_id: str) -> Response:
         return await relay(request, "GET", f"/runs/{run_id}/results.csv")
 
-    app.mount("/", StaticFiles(directory=WEB_DIR, html=True), name="web")
+    app.mount("/", WebFiles(directory=WEB_DIR, html=True), name="web")
     return app
+
+
+class WebFiles(StaticFiles):
+    """The page's files, which browsers must check for a newer version before reusing (a 304 when unchanged).
+
+    Without this a browser can keep running an old main.js for hours after an update."""
+
+    def file_response(self, *args: Any, **kwargs: Any) -> Response:
+        response = super().file_response(*args, **kwargs)
+        response.headers["Cache-Control"] = "no-cache"
+        return response
 
 
 class PasswordGate:

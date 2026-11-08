@@ -450,7 +450,7 @@ async function refreshAssistant(refresh = false) {
     h("span", { class: `dot ${status.ok ? "ok" : "bad"}`, "aria-hidden": "true" }),
     h("strong", {}, status.label || "AI model"),
     status.ok ? "ready" : "not connected",
-    status.free ? h("span", { class: "mode" }, "free") : null,
+    ...(status.free ? [h("span", { class: "mode" }, "free")] : []),
   );
   $("claude-banner").hidden = status.ok;
   $("claude-banner-text").textContent = status.detail;
@@ -491,6 +491,12 @@ async function refreshDevices() {
             ? h("button", { type: "button", class: "chip-btn", title: "Mark it parked at home and empty-handed",
                 onclick: () => resetTransport(d.name ?? id) }, "Reset")
             : null,
+          ...(d.access && !busy
+            ? ["open", "close"].map((action) =>
+                h("button", { type: "button", class: "chip-btn", title: `${action === "open" ? "Open" : "Close"} the ${d.name ?? id} drawer`,
+                  disabled: drawerMoving ? "" : null, onclick: () => moveDrawer(id, action) },
+                  drawerMoving === `${id}/${action}` ? (action === "open" ? "Opening…" : "Closing…") : action === "open" ? "Open" : "Close"))
+            : []),
         );
       }),
     );
@@ -506,6 +512,21 @@ async function resetTransport(name) {
     await api("/api/transport/reset", { method: "POST" });
   } catch (err) {
     alert(err.message);
+  }
+  await refreshDevices();
+}
+
+// A person opens the reader drawer to take a plate out (or closes it again). Refused during a run.
+let drawerMoving = null; // "tecan/open" while that request is out, so status refreshes keep the buttons disabled
+async function moveDrawer(id, action) {
+  drawerMoving = `${id}/${action}`;
+  await refreshDevices();
+  try {
+    await api(`/api/instruments/${encodeURIComponent(id)}/access/${action}`, { method: "POST" });
+  } catch (err) {
+    alert(err.message);
+  } finally {
+    drawerMoving = null;
   }
   await refreshDevices();
 }

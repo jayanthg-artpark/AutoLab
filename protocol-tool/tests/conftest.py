@@ -142,6 +142,8 @@ class FakeMaster:
             return httpx.Response(200, json={"instruments": INSTRUMENTS})
         if request.method == "POST" and path == "/transport/reset":
             return httpx.Response(200, json={"at_home": True, "holding_plate": False, "detail": "home, empty-handed"})
+        if request.method == "POST" and path == "/instruments/tecan/access/open":
+            return httpx.Response(200, json={"detail": "Tecan Infinite M200 Pro: drawer opened"})
         if path == "/runs/run-1":
             return httpx.Response(200, json=FINISHED_RUN)
         if path == "/runs/run-1/results":

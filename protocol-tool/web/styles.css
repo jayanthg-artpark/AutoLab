@@ -135,6 +135,8 @@ h3 { font-size: 14px; font-weight: 650; }
   background: transparent; color: var(--ink); cursor: pointer;
 }
 .chip-btn:hover { background: var(--surface-2); }
+.chip-btn:not(:last-child) { margin-right: 0; }
+.chip-btn:disabled { opacity: 0.5; cursor: default; }
 
 @media (max-width: 760px) {
   .topbar { height: auto; flex-wrap: wrap; padding: 10px 16px; gap: 10px; }
