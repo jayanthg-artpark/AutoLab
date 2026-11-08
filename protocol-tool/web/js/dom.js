@@ -170,7 +170,9 @@ export function markdown(text) {
     } else if (!line.trim()) {
       i++;
     } else {
-      const para = [];
+      // Always take the first line: a table row without its |---| line (still streaming in, or just
+      // text) is a block start that no branch above took, and skipping it would loop forever.
+      const para = [lines[i++]];
       while (i < lines.length && lines[i].trim() && !isBlockStart(lines[i])) para.push(lines[i++]);
       const p = h("p");
       para.forEach((l, k) => p.append(...(k ? [h("br")] : []), ...inline(l)));
