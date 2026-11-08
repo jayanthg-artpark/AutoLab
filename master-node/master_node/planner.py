@@ -7,6 +7,8 @@ sequencer executes. Deterministic, no AI:
 3. Add plate moves: the plate starts in storage; before each step that happens
    on a different instrument, the transport moves it there, then the master
    node waits for the transport to clear before the instrument starts.
+4. Release the plate: if the plate ends in a plate reader, its drawer opens at
+   the end so the plate can be taken out.
 """
 
 from __future__ import annotations
@@ -79,6 +81,12 @@ def plan_run(submission: ProtocolSubmission, registry: Registry) -> tuple[list[S
             location = dest
         steps.append(Step(key="operation", label=op.label or OPERATION_LABEL[op.type], device=inst.id,
                           params={"op": index, "slot": slot, "summary": describe_step(op)}))
+
+    last = registry.get(location.station)
+    if last is not None and last.kind == "plate_reader":
+        # Nothing moves the plate on after a run, so open the reader's drawer for whoever takes it out.
+        steps.append(Step(key="release", label=f"Open {last.name} to take the plate out", device=last.id,
+                          params={"station": last.id}))
 
     for n, step in enumerate(steps, start=1):
         step.id = f"{n}-{step.key}"

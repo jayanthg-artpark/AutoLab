@@ -78,6 +78,10 @@ class _JobServer(HttpDevice):
 
 
 class JobApiInstrument(_JobServer):
+    @property
+    def has_access(self) -> bool:
+        return bool(self._settings.options.get("access"))
+
     async def check_ready(self) -> str | None:
         status = await self._health()
         if not status.get("ready"):

@@ -5,7 +5,7 @@ import time
 from fastapi.testclient import TestClient
 
 from master_node.devices.manual import ManualThor
-from master_node.devices.sim import SimFlex, SimInstrument, SimThor
+from master_node.devices.sim import SimFlex, SimInstrument, SimTecan, SimThor
 from master_node.main import create_app
 from master_node.registry import Instrument
 
@@ -28,7 +28,9 @@ def test_full_run_moves_plate_and_stores_results(app_with):
         assert [s["label"] for s in run["steps"]] == [
             "Decode + plan", "Fetch plate to Opentrons Flex", "Opentrons Flex is clear", "Run protocol",
             "Move plate to Tecan Infinite M200 Pro", "Tecan Infinite M200 Pro is clear", "Read plate",
+            "Open Tecan Infinite M200 Pro to take the plate out",
         ]
+        assert run["steps"][-1]["detail"] == "Tecan Infinite M200 Pro: drawer opened; take the plate out"
         assert run["has_results"]
 
         assert [(str(a), str(b)) for a, b in thor.transfers] == [
@@ -99,7 +101,7 @@ def test_flex_failure_stops_the_run_before_moving_the_plate(app_with):
         assert run["status"] == "failed"
         statuses = [(s["label"], s["status"]) for s in run["steps"]]
         assert ("Run protocol", "failed") in statuses
-        assert statuses[-1] == ("Read plate", "skipped")
+        assert statuses[-2:] == [("Read plate", "skipped"), ("Open Tecan Infinite M200 Pro to take the plate out", "skipped")]
         assert len(thor.transfers) == 1  # the plate stays on the Flex
         assert "no tip detected" in run["error"]
 
@@ -206,7 +208,7 @@ def test_safety_limits_reject_steps_and_plan_previews_without_queuing(settings):
 
         plan = client.post("/plan", json=make_workflow(liquid_step(), read_step()))
         assert plan.status_code == 200, plan.text
-        assert [s["device"] for s in plan.json()["steps"]] == ["master", "thor", "thor", "flex", "thor", "thor", "tecan"]
+        assert [s["device"] for s in plan.json()["steps"]] == ["master", "thor", "thor", "flex", "thor", "thor", "tecan", "tecan"]
         assert client.get("/runs").json() == []  # nothing queued
 
         listed = client.get("/instruments").json()["instruments"]
@@ -255,7 +257,40 @@ def test_devices_lists_every_registered_instrument(app_with):
     with app_with(WASHER) as client:
         devices = client.get("/devices").json()
         assert list(devices) == ["thor", "flex", "tecan", "washer"]
-        assert devices["washer"] == {"ok": True, "detail": "ready", "mode": "sim", "name": "Plate washer", "kind": "plate_washer"}
+        assert devices["washer"] == {
+            "ok": True, "detail": "ready", "mode": "sim", "name": "Plate washer", "kind": "plate_washer", "access": False,
+        }
+        assert devices["tecan"]["access"] is True
+        assert "access" not in devices["thor"]
+
+
+def test_a_person_can_open_and_close_the_reader_drawer(app_with):
+    tecan = SimTecan(0.001)
+    with app_with(tecan=tecan) as client:
+        opened = client.post("/instruments/tecan/access/open")
+        assert opened.json() == {"detail": "Tecan Infinite M200 Pro: drawer opened"}
+        assert tecan.tray_open
+        assert client.post("/instruments/tecan/access/close").json() == {"detail": "Tecan Infinite M200 Pro: drawer closed"}
+        assert not tecan.tray_open
+
+        assert client.post("/instruments/flex/access/open").status_code == 400  # nothing to open
+        assert client.post("/instruments/thor/access/open").status_code == 404
+        assert client.post("/instruments/tecan/access/shake").status_code == 404
+
+
+def test_the_drawer_is_left_alone_while_a_run_is_running(app_with):
+    tecan = SimTecan(0.001)
+    with app_with(flex=SimFlex(0.05), tecan=tecan) as client:
+        run_id = client.post("/runs", json=make_submission()).json()["id"]
+        deadline = time.monotonic() + 5
+        while client.get("/runs").json()[0]["status"] != "running":
+            assert time.monotonic() < deadline, "never started"
+            time.sleep(0.01)
+
+        response = client.post("/instruments/tecan/access/open")
+        assert response.status_code == 409
+        assert run_id in response.json()["detail"]
+        wait_for_status(client, run_id, {"succeeded"})
 
 
 def test_api_key_is_enforced(settings, app_with):

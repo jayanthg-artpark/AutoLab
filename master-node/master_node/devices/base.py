@@ -69,6 +69,9 @@ class Transport(Protocol):
 class Instrument(Protocol):
     """An instrument that works on the plate where it sits."""
 
+    # True when open_access/close_access move something (a drawer or lid) a person may also want to open.
+    has_access: bool
+
     async def check_ready(self) -> str | None:
         """Raises DeviceError if the instrument is unreachable or busy; may return a status line."""
 
@@ -97,6 +100,8 @@ class Instrument(Protocol):
 
 class NoAccess:
     """For instruments whose plate position is always reachable."""
+
+    has_access = False
 
     async def open_access(self) -> str | None:
         return None

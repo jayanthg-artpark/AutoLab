@@ -20,7 +20,9 @@ def test_plan_follows_the_sequence_diagram():
         "Decode + plan",
         "Fetch plate to Opentrons Flex", "Opentrons Flex is clear", "Run protocol",
         "Move plate to Tecan Infinite M200 Pro", "Tecan Infinite M200 Pro is clear", "Read plate",
+        "Open Tecan Infinite M200 Pro to take the plate out",
     ]
+    assert steps[-1].key == "release" and steps[-1].device == "tecan"
     assert [s.id for s in steps][:3] == ["1-decode_plan", "2-transfer", "3-clear"]
     assert steps[0].status is StepStatus.done
     assert all(s.status is StepStatus.pending for s in steps[1:])
@@ -114,3 +116,11 @@ def test_holds_need_no_instrument_and_no_move():
     steps, _ = plan(make_workflow(liquid_step(), {"type": "hold", "seconds": 600}))
     assert [s.key for s in steps] == ["decode_plan", "transfer", "clear", "operation", "hold"]
     assert steps[-1].device == "master"
+
+
+def test_plate_left_in_a_reader_is_released_only_at_the_end():
+    steps, _ = plan(make_workflow(read_step(), {"type": "hold", "seconds": 60}))
+    assert [s.key for s in steps] == ["decode_plan", "transfer", "clear", "operation", "hold", "release"]
+
+    steps, _ = plan(make_workflow(read_step(), liquid_step()))
+    assert "release" not in [s.key for s in steps]  # the plate ends on the Flex

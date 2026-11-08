@@ -36,6 +36,7 @@ WELL = re.compile(r"^[A-P]\d{1,2}$")
 
 class TecanInfiniteHttp(HttpDevice):
     name = "Tecan"
+    has_access = True
 
     def __init__(self, settings: Instrument, transport: httpx.AsyncBaseTransport | None = None):
         super().__init__(

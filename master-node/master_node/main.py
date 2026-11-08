@@ -116,7 +116,29 @@ def create_app(
         for instrument_id, result in zip(checks, results):
             entry = registry.get(instrument_id)
             status[instrument_id] = {**result, "mode": entry.driver, "name": entry.name, "kind": entry.kind}
+            if entry.kind != "transport":
+                status[instrument_id]["access"] = getattr(lab.instruments[instrument_id], "has_access", False)
         return status
+
+    @api.post("/instruments/{instrument_id}/access/{action}")
+    async def instrument_access(instrument_id: str, action: str) -> dict[str, Any]:
+        """A person opens or closes an instrument's drawer or lid, e.g. to take a plate out of the reader."""
+        if action not in ("open", "close"):
+            raise HTTPException(404, "Use open or close")
+        entry = registry.get(instrument_id)
+        device = lab.instruments.get(instrument_id) if entry and entry.kind != "transport" else None
+        if device is None:
+            raise HTTPException(404, f"No instrument {instrument_id}")
+        if not getattr(device, "has_access", False):
+            raise HTTPException(400, f"{entry.name} has no drawer or lid to {action}")
+        if running := store.list(status=RunStatus.running, limit=1):
+            raise HTTPException(409, f"Run {running[0].id} is running; the {entry.name} is left to it")
+        try:
+            done = await (device.open_access() if action == "open" else device.close_access())
+        except DeviceError as exc:
+            raise HTTPException(502, str(exc)) from exc
+        log.info("%s %s by a person", entry.name, done)
+        return {"detail": f"{entry.name}: {done}"}
 
     @api.post("/transport/reset")
     async def reset_transport() -> dict[str, Any]:

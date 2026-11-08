@@ -56,6 +56,7 @@ class Sequencer:
             "clear": self._confirm_clear,
             "operation": self._operation,
             "hold": self._hold,
+            "release": self._release_plate,
         }
 
     # --- Queue -----------------------------------------------------------------
@@ -300,6 +301,12 @@ class Sequencer:
         output = await instrument.wait(handle, self._progress(run, name))
         run.context.pop("job")
         return self._keep_output(run, step, output) or f"{name} finished {handle}"
+
+    async def _release_plate(self, run: Run, step: Step) -> str:
+        """Opens the drawer of the instrument the plate ended in, so it can be taken out."""
+        name = self._name(step.params["station"])
+        done = await self._instrument(step.params["station"]).open_access()
+        return f"{name}: {done}; take the plate out" if done else f"Take the plate out of the {name}"
 
     async def _hold(self, run: Run, step: Step) -> str:
         await asyncio.sleep(step.params["seconds"] * self._hold_scale)

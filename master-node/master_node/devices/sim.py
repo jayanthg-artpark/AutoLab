@@ -135,6 +135,8 @@ class SimFlex(NoAccess, _Sim):
 
 
 class SimTecan(_Sim):
+    has_access = True
+
     def __init__(self, time_scale: float = 1.0):
         super().__init__(time_scale)
         self.tray_open = False
