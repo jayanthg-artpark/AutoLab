@@ -11,6 +11,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import hashlib
+import html
 import io
 import json
 import logging
@@ -160,6 +161,7 @@ class OpenAICompatModel:
         text = ""
         calls: dict[int, dict[str, Any]] = {}
         finish = None
+        thinking = False
 
         async def all_chunks():
             if first is not None:
@@ -170,9 +172,16 @@ class OpenAICompatModel:
         async for chunk in all_chunks():
             for choice in chunk.get("choices") or []:
                 delta = choice.get("delta") or {}
-                if delta.get("content"):
-                    text += delta["content"]
-                    yield {"type": "text", "text": delta["content"]}
+                if ((delta.get("extra_content") or {}).get("google") or {}).get("thought"):
+                    # Gemma's reasoning (Gemini API): not part of the reply.
+                    if not thinking:
+                        thinking = True
+                        yield {"type": "thinking"}
+                elif delta.get("content"):
+                    piece = THOUGHT_TAGS.sub("", delta["content"])
+                    if piece:
+                        text += piece
+                        yield {"type": "text", "text": piece}
                 for position, part in enumerate(delta.get("tool_calls") or []):
                     index = part.get("index", position)
                     call = calls.setdefault(index, {"id": "", "name": "", "arguments": "", "extra": {}})
@@ -290,12 +299,18 @@ def next_quota_reset(now: float) -> float:
 
 
 def _http_error(p: Provider, model: str, response: httpx.Response) -> ModelError:
+    if response.status_code == 524:  # Cloudflare (a tunnel to the model's server) gives up after 100 s
+        return ModelError(f"{p.label} {model} took more than 100 s to start answering, and the Cloudflare tunnel to it "
+                          "gave up. The model is too slow on that machine for this conversation: use a faster model.")
     try:
         error = response.json()
         error = error[0] if isinstance(error, list) else error
         message = (error.get("error") or {}).get("message") or response.text
     except (ValueError, AttributeError):
         message = response.text
+    if re.match(r"\s*<(!doctype|html)", str(message), re.IGNORECASE):  # an error page, e.g. from a proxy
+        title = re.search(r"<title>(.*?)</title>", str(message), re.IGNORECASE | re.DOTALL)
+        message = " ".join(html.unescape(title.group(1)).split()) if title else "an HTML error page"
     message = str(message)[:400]
     # Gemini answers a bad key with 400 "Please pass a valid API key" (or API_KEY_INVALID).
     if response.status_code == 401 or (response.status_code == 400 and "api key" in message.lower()):
@@ -321,6 +336,8 @@ def _http_error(p: Provider, model: str, response: httpx.Response) -> ModelError
 
 # Accepted by Gemini in place of a thought signature it can't check (history from another model).
 GEMINI_PLACEHOLDER_SIGNATURE = "skip_thought_signature_validator"
+# Gemma (Gemini API) wraps its reasoning in these; the reasoning itself is flagged and skipped.
+THOUGHT_TAGS = re.compile(r"</?thought>")
 
 
 def to_openai_tool(tool: dict[str, Any]) -> dict[str, Any]:
@@ -348,7 +365,7 @@ def to_openai_messages(
                 }
                 for b in content if b.get("type") == "tool_use"
             ]
-            if calls and model and model.startswith("gemini") and not any("extra_content" in c for c in calls):
+            if calls and model and model.startswith(("gemini", "gemma")) and not any("extra_content" in c for c in calls):
                 # Calls made by another model (a fallback after a quota error, or a session that switched
                 # provider) carry no signature this Gemini model accepts, and Gemini rejects function calls
                 # without one. Google's documented placeholder goes where Gemini puts signatures: the first call.

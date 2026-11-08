@@ -132,6 +132,33 @@ def test_streams_text_and_split_tool_calls():
     assert "write_protocol" in [t["function"]["name"] for t in request["tools"]]
 
 
+def test_gemmas_reasoning_is_not_shown():
+    thought = {"extra_content": {"google": {"thought": True}}}
+    api = FakeChatAPI((200, sse(
+        delta(content="<thought>* Question: why?\n", **thought),
+        delta(content="* Draft 1: ...", **thought),
+        delta(content="</thought>A fresh"),
+        delta(content=" tip per well."),
+        delta(finish="stop"),
+    )))
+    events = collect(OpenAICompatModel(GEMINI, httpx.MockTransport(api)))
+
+    assert [e["text"] for e in events[:-1] if e["type"] == "text"] == ["A fresh", " tip per well."]
+    assert [e for e in events[:-1] if e["type"] == "thinking"] == [{"type": "thinking"}]
+    assert events[-1].content == [{"type": "text", "text": "A fresh tip per well."}]
+
+
+def test_a_tunnel_timeout_is_explained_not_dumped():
+    page = b"<!DOCTYPE html><html><head><title>trycloudflare.com | 524: A timeout occurred</title></head></html>"
+    with pytest.raises(ModelError) as error:
+        collect(OpenAICompatModel(OLLAMA, httpx.MockTransport(FakeChatAPI((524, page)))))
+    assert "took more than 100 s to start answering" in str(error.value) and "<" not in str(error.value)
+
+    with pytest.raises(ModelError) as error:
+        collect(OpenAICompatModel(OLLAMA, httpx.MockTransport(FakeChatAPI((530, page.replace(b"524", b"530"))))))
+    assert "530: A timeout occurred" in str(error.value) and "DOCTYPE" not in str(error.value)
+
+
 OVERLOADED = b'[{"error": {"code": 503, "message": "This model is currently experiencing high demand.", "status": "UNAVAILABLE"}}]'
 OK = sse(delta(content="ok"), delta(finish="stop"))
 
