@@ -9,7 +9,7 @@ import pytest
 
 from protocol_tool.knowledge import Knowledge
 from protocol_tool.knowledge_import import (
-    ImportProblem, import_github, import_opentrons_docs, import_opentrons_labware, import_opentrons_library,
+    ImportProblem, import_github, import_library_folder, import_opentrons_docs, import_opentrons_labware, import_opentrons_library,
     import_protocols_io, import_url,
 )
 
@@ -192,3 +192,24 @@ def test_url_import_of_html_and_pdf(tmp_path):
     assert import_url(tmp_path, "https://vendor.test/docs/kit-manual.pdf", transport=httpx.MockTransport(web), progress=quiet) == "manuals/kit-manual.pdf"
     with pytest.raises(ImportProblem):
         import_url(tmp_path, "file:///etc/passwd", progress=quiet)
+
+
+def test_flex_protocols_downloaded_from_the_library_website(tmp_path):
+    download = tmp_path / "download"
+    download.mkdir()
+    (download / "elisa__ELISA_Flex.py").write_text(
+        "metadata = {'protocolName': 'ELISA', 'author': 'Opentrons', 'description': 'Coats a plate.'}\n"
+        "requirements = {'robotType': 'Flex', 'apiLevel': '2.20'}\ndef run(protocol):\n    pass\n", encoding="utf-8")
+    (download / "old__pcr.py").write_text("metadata = {}\nrequirements = {'robotType': 'OT-3'}\n", encoding="utf-8")
+    (download / "ot2__x.py").write_text("metadata = {'apiLevel': '2.13'}\ndef run(ctx): pass\n", encoding="utf-8")
+    (download / "manifest.csv").write_text(
+        '"name","slug","status","saved_as"\n'
+        f'"Invitrogen ELISA: coating","elisa","downloaded","{download / "elisa__ELISA_Flex.py"}"\n'
+        '"Gone","gone","unavailable",""\n', encoding="utf-8-sig")
+    root = tmp_path / "knowledge"
+    assert import_library_folder(root, download, progress=quiet) == 2  # "OT-3" is a Flex too; the OT-2 one is left out
+    doc = (root / "protocols/opentrons-flex-library/elisa.md").read_text(encoding="utf-8")
+    assert doc.startswith("# Invitrogen ELISA: coating\n") and "https://library.opentrons.com/p/elisa" in doc
+    assert "Author: Opentrons" in doc and "Coats a plate." in doc and "def run(protocol):" in doc
+    assert (root / "protocols/opentrons-flex-library/old-pcr.md").exists()
+    assert Knowledge(root).search("ELISA coating")[0][0].doc == "protocols/opentrons-flex-library/elisa.md"

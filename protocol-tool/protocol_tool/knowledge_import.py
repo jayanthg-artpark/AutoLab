@@ -75,7 +75,8 @@ OTHER_ROBOT = re.compile(r"\bOT-?2\b", re.IGNORECASE)
 OTHER_ROBOT_HARDWARE = re.compile(
     r"\bp(10|20|50|300|1000)_(single|multi)(_gen[12])?\b|\bopentrons_96_(filter)?tiprack_\d|\bmagdeck\b"
     r"|\bmagnetic module( gen[12])?\b|\btemperature module gen1\b|\bthermocycler module gen1\b", re.IGNORECASE)
-FLEX_CODE = re.compile(r"""["']robotType["']\s*:\s*["']Flex["']""")
+# "OT-3" is what older Flex protocols declare.
+FLEX_CODE = re.compile(r"""["']robotType["']\s*:\s*["'](Flex|OT-3)["']""")
 # API docs pages only about hardware the Flex can't use.
 OTHER_ROBOT_PAGES = {"adapting-ot2-flex", "modules-magnetic-module", "reference-magnetic-module"}
 
@@ -192,6 +193,80 @@ def _library_from_zip(root: Path, z: zipfile.ZipFile, progress: Callable[[str], 
             progress(f"  {count} protocols written")
     sources.save()
     progress(f"Imported {count} Flex protocols into {target}")
+    return count
+
+
+# --- Opentrons Protocol Library, downloaded from its website --------------------------------------
+
+LIBRARY_FOLDER = "protocols/opentrons-flex-library"
+
+
+def _metadata(code: str) -> dict[str, Any]:
+    """The protocol's metadata dict, read without running the code (only plain literals)."""
+    import ast
+    import warnings
+
+    try:
+        with warnings.catch_warnings():  # e.g. invalid escapes in the downloaded code
+            warnings.simplefilter("ignore", SyntaxWarning)
+            tree = ast.parse(code)
+    except SyntaxError:
+        return {}
+    for node in tree.body:
+        if isinstance(node, ast.Assign) and any(isinstance(t, ast.Name) and t.id == "metadata" for t in node.targets):
+            try:
+                value = ast.literal_eval(node.value)
+            except ValueError:
+                return {}
+            return value if isinstance(value, dict) else {}
+    return {}
+
+
+def import_library_folder(root: Path, folder: Path, *, progress: Callable[[str], None] = print) -> int:
+    """Flex protocols downloaded from library.opentrons.com into one folder: the .py files, with the
+    download's manifest.csv (name, slug, saved_as) for each protocol's title and library page."""
+    import csv
+
+    folder = Path(folder)
+    if not folder.is_dir():
+        raise ImportProblem(f"{folder} is not a folder")
+    names: dict[str, tuple[str, str]] = {}  # file name -> (title, slug)
+    manifest = folder / "manifest.csv"
+    if manifest.exists():
+        with manifest.open(encoding="utf-8-sig", newline="") as f:
+            for row in csv.DictReader(f):
+                if row.get("status") == "downloaded" and row.get("saved_as"):
+                    names[Path(row["saved_as"].replace("\\", "/")).name] = (row.get("name") or "", row.get("slug") or "")
+    sources = Sources(root)
+    target = root / LIBRARY_FOLDER
+    for old in target.glob("*.md"):  # refreshed below
+        old.unlink()
+        sources.entries.pop(f"{LIBRARY_FOLDER}/{old.name}", None)
+    count = skipped = 0
+    for path in sorted(folder.glob("*.py")):
+        code = path.read_text(encoding="utf-8", errors="replace")
+        if not FLEX_CODE.search(code):
+            skipped += 1  # written for another robot
+            continue
+        meta = _metadata(code)
+        title, slug = names.get(path.name, ("", ""))
+        title = title or str(meta.get("protocolName") or path.stem)
+        url = f"https://library.opentrons.com/p/{slug}" if slug else "https://library.opentrons.com/"
+        if len(code) > MAX_CODE_CHARS:
+            code = code[:MAX_CODE_CHARS] + "\n# ... (cut: longer than the knowledge import keeps)"
+        parts = [f"# {title}", "", f"Source: Opentrons Protocol Library, {url}", "Robot: Flex, Opentrons Python API v2.",
+                 f"Terms: {LIBRARY_TERMS}", ""]
+        if meta.get("author"):
+            parts.append(f"Author: {meta['author']}")
+        if meta.get("description"):
+            parts += ["", str(meta["description"]).strip()]
+        parts += ["", f"## Protocol code ({path.name})", "```python", code.rstrip(), "```", ""]
+        doc_id = f"{LIBRARY_FOLDER}/{slugify(slug or path.stem)}.md"
+        _write(root, doc_id, "\n".join(parts))
+        sources.add(doc_id, source="Opentrons Protocol Library", url=url, license=LIBRARY_TERMS, robot="Flex")
+        count += 1
+    sources.save()
+    progress(f"Imported {count} Flex protocols into {target}" + (f" ({skipped} for other robots left out)" if skipped else ""))
     return count
 
 
@@ -791,6 +866,9 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--knowledge", help="knowledge folder (default: [knowledge] folder in config.toml)")
     sub = parser.add_subparsers(dest="source", required=True)
     sub.add_parser("opentrons-library", help="every protocol in the Opentrons Protocol Library")
+    lib = sub.add_parser("opentrons-library-folder",
+                         help="Flex protocols downloaded from library.opentrons.com into a folder (with its manifest.csv)")
+    lib.add_argument("path")
     sub.add_parser("opentrons-docs", help="the Opentrons Python API documentation")
     sub.add_parser("opentrons-labware", help="every standard Opentrons labware definition (from the installed opentrons)")
     pio = sub.add_parser("protocols-io", help="public protocols.io protocols matching search terms")
@@ -809,6 +887,8 @@ def main(argv: list[str] | None = None) -> int:
     try:
         if args.source == "opentrons-library":
             import_opentrons_library(root)
+        elif args.source == "opentrons-library-folder":
+            import_library_folder(root, Path(args.path))
         elif args.source == "opentrons-docs":
             import_opentrons_docs(root)
         elif args.source == "opentrons-labware":
