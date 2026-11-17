@@ -1,5 +1,8 @@
 # Sandwich ELISA on a pre-coated plate (example template)
 
+For how this lab runs ELISAs on its Flex (washing without a plate washer, tips for the whole run, one tube per
+liquid) and worked examples, read templates/elisa-on-this-lab.md and protocols/lab-elisa/.
+
 The general shape of a colorimetric sandwich ELISA with an HRP detection system and
 TMB substrate. Every kit differs: where the kit manual gives volumes, incubation
 times, wash counts or wavelengths, follow the manual, not this template.

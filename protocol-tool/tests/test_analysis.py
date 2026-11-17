@@ -128,3 +128,27 @@ def test_quadratic_inverse_picks_the_root_inside_the_range():
     y = 0.02 + 0.0009 * x - 0.0002e-3 * x ** 2
     fit = fit_curve("quadratic", x, y)
     assert fit.inverse(0.02 + 0.0009 * 800 - 0.0002e-3 * 800 ** 2) == pytest.approx(800, rel=1e-3)
+
+
+def test_a_plate_of_standards_only_gets_its_curve_and_r2():
+    spec, measurements = bradford()
+    standards_only = Analysis(**{**spec.model_dump(), "samples": []})
+    out = run_analysis(standards_only, measurements)
+    assert out["series"][0]["fit"]["r2"] > 0.999 and len(out["series"][0]["curve"]) > 50
+    assert out["samples"] == []
+
+
+def test_r2_is_given_over_all_wells_and_over_the_replicate_means():
+    # Triplicates on a straight line, but scattered within each level: the means line up, the wells don't.
+    x = [0, 2, 4, 6, 8, 10]
+    values = {}
+    for i, c in enumerate(x):
+        for col, noise in zip("123", (-0.05, 0.0, 0.05)):
+            values[f"{'ABCDEF'[i]}{col}"] = 0.2 + 0.03 * c + noise
+    spec = Analysis(title="BSA", kind="standard_curve", measurement="Absorbance 595 nm", fit="linear",
+                    standards=[{"name": f"{c} uL", "wells": [f"{'ABCDEF'[i]}{n}" for n in "123"], "x": c} for i, c in enumerate(x)])
+    out = run_analysis(spec, [reading("Absorbance 595 nm", values)])
+    fit = out["series"][0]["fit"]
+    assert fit["r2_means"] == pytest.approx(1.0) and fit["r2"] < 0.95
+    assert any("over all wells (1.000 on the replicate means)" in w for w in out["warnings"])
+    assert "r2_means" in analysis_csv("run", [out]).splitlines()[0]

@@ -38,9 +38,19 @@ export function renderAnalysis(a) {
   return h("section", { class: "an" }, parts);
 }
 
+// "triplicates" when every point has 3 wells, and so on.
+function replicateWord(points) {
+  const ns = new Set(points.map((p) => p.n));
+  const n = ns.size === 1 ? [...ns][0] : 0;
+  return { 2: "duplicates", 3: "triplicates", 4: "quadruplicates" }[n] ?? "replicates";
+}
+
 function fitLine(series, named) {
   const f = series.fit;
-  const bits = [`${FIT_LABEL[f.model] ?? f.model}: ${f.equation}`, f.r2 != null ? `R² ${f.r2.toFixed(4)}` : null,
+  const means = f.r2_means != null;
+  const bits = [`${FIT_LABEL[f.model] ?? f.model}: ${f.equation}`,
+    f.r2 != null ? `R² ${f.r2.toFixed(4)}${means ? " (all wells)" : ""}` : null,
+    means ? `R² ${f.r2_means.toFixed(4)} (mean of ${replicateWord(series.points)})` : null,
     f.ec50 != null ? `EC50 ${formatValue(f.ec50)}` : null,
     f.efficiency_percent != null ? `efficiency ${f.efficiency_percent.toFixed(1)}%` : null].filter(Boolean);
   return h("p", { class: "an-fit" }, named ? h("strong", {}, `${series.name}: `) : null, bits.join(" · "));

@@ -28,6 +28,7 @@ def settings(tmp_path) -> Settings:
     s.server.database = str(tmp_path / "sessions.db")
     s.master.url = "http://master.test"
     s.knowledge.folder = str(tmp_path / "knowledge")
+    s.lab.fresh_tip_racks = False  # most tip tests continue racks between runs
     return s
 
 

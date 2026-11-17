@@ -52,7 +52,10 @@ def _start(used: int, channels: int) -> int:
 
 
 class TipTracker:
-    def __init__(self, path: str):
+    def __init__(self, path: str, fresh_each_run: bool = False):
+        # fresh_each_run: staff put full racks in before every run, so a run starts at A1 of each
+        # rack whatever earlier runs used (protocols later in the same run still continue the racks).
+        self.fresh_each_run = fresh_each_run
         self._conn = sqlite3.connect(path, check_same_thread=False)
         self._lock = threading.Lock()
         with self._lock, self._conn:
@@ -89,7 +92,8 @@ class TipTracker:
         in the same run will leave. Raises TipProblem when the racks on the deck
         can't serve the protocol.
         """
-        known = {r.slot: r for r in self.racks()}
+        # With fresh racks every run, the records only say what earlier runs used.
+        known = {} if self.fresh_each_run else {r.slot: r for r in self.racks()}
         used_now = used_now or {}
         before: dict[str, int] = {}
         after: dict[str, tuple[str, int]] = {}
@@ -134,8 +138,9 @@ class TipTracker:
     def used_after(self, pending: list[list[TipUse]]) -> dict[str, int]:
         """Tips used per rack once these protocols (queued ahead, in order) have taken theirs.
 
-        A protocol the racks can't serve is skipped: its run will fail at preflight and take none."""
-        used = {r.slot: r.used for r in self.racks()}
+        A protocol the racks can't serve is skipped: its run will fail at preflight and take none.
+        With fresh racks every run, give only the protocols run before it in the same run."""
+        used = {} if self.fresh_each_run else {r.slot: r.used for r in self.racks()}
         for uses in pending:
             try:
                 _, after = self.plan(uses, used)

@@ -12,6 +12,7 @@
   --accent: #2a78d6;
   --accent-soft: rgba(42, 120, 214, 0.12);
   --accent-ink: #ffffff;
+  --accent-text: #1c5fb4;  /* accent-coloured text on a tinted button */
   --good: #0ca30c;
   --good-ink: #006300;
   --warning: #fab219;
@@ -51,6 +52,7 @@
     --border: rgba(255, 255, 255, 0.10);
     --accent: #3987e5;
     --accent-soft: rgba(57, 135, 229, 0.18);
+    --accent-text: #9cc4f5;
     --good-ink: #2fbf2f;
     --critical-ink: #ef7272;
     --focus: #6da7ec;
@@ -95,25 +97,52 @@ h3 { font-size: 14px; font-weight: 650; }
   height: var(--header-h);
   display: flex; align-items: center; gap: 20px;
   padding: 0 20px;
-  background: var(--surface);
+  /* A thin band of the brand colours along the top edge, and a soft shadow that lifts the bar off the page. */
+  background:
+    linear-gradient(90deg, var(--accent), var(--chart-3) 55%, var(--accent)) top / 100% 3px no-repeat,
+    var(--surface);
   border-bottom: 1px solid var(--hairline);
+  box-shadow: 0 2px 10px rgba(11, 11, 11, 0.05);
   position: sticky; top: 0; z-index: 5;
 }
 .brand { display: flex; align-items: center; gap: 10px; }
-.brand-icon { width: 26px; height: 26px; color: var(--accent); flex: none; }
+/* The product mark: the plate icon in white on a blue tile, like an app icon. */
+.brand-icon {
+  width: 32px; height: 32px; padding: 5px; flex: none; color: #fff;
+  border-radius: 9px;
+  background: linear-gradient(140deg, #4a97ee, #1c5fb4);
+  box-shadow: 0 1px 2px rgba(11, 11, 11, 0.2), 0 3px 8px rgba(42, 120, 214, 0.3), inset 0 1px 0 rgba(255, 255, 255, 0.28);
+}
+.brand h1 { font-size: 17px; font-weight: 700; letter-spacing: -0.015em; }
 /* The ARTPARK logo is drawn for a light background, so dark mode gives it a light panel. */
 .org-logo { height: 30px; width: auto; flex: none; display: block; }
 .brand-divider { width: 1px; height: 24px; background: var(--hairline); flex: none; margin: 0 4px; }
 @media (prefers-color-scheme: dark) {
   .org-logo { background: #f6f5f2; padding: 3px 8px; border-radius: 6px; box-sizing: content-box; height: 24px; }
 }
-.tabs { display: flex; gap: 2px; background: var(--surface-2); padding: 3px; border-radius: 9px; }
-.tabs button {
-  font: inherit; font-weight: 600; font-size: 13px;
-  border: 0; background: transparent; color: var(--ink-2);
-  padding: 5px 14px; border-radius: 7px; cursor: pointer;
+.tabs {
+  display: flex; gap: 3px; background: var(--surface-2); padding: 4px; border-radius: 11px;
+  border: 1px solid var(--hairline);
 }
-.tabs button[aria-selected="true"] { background: var(--surface); color: var(--ink); box-shadow: 0 1px 2px rgba(0, 0, 0, 0.08); }
+.tabs button {
+  display: inline-flex; align-items: center; gap: 7px;
+  font: inherit; font-weight: 600; font-size: 13.5px;
+  border: 0; background: transparent; color: var(--ink-2);
+  padding: 6px 16px; border-radius: 8px; cursor: pointer;
+  transition: background-color 0.15s, color 0.15s, box-shadow 0.15s;
+}
+.tabs button[data-icon]::before {
+  content: ""; flex: none; width: 14px; height: 14px; background: currentColor;
+  -webkit-mask: var(--icon) center / contain no-repeat; mask: var(--icon) center / contain no-repeat;
+}
+.tabs button:hover:not([aria-selected="true"]), .segmented button:hover:not([aria-checked="true"]) {
+  background: var(--accent-soft); color: var(--accent-text);
+}
+/* The view you are on: a raised white tab with the label and icon in the accent colour. */
+.tabs button[aria-selected="true"] {
+  background: var(--surface); color: var(--accent-text);
+  box-shadow: 0 1px 2px rgba(11, 11, 11, 0.12), 0 2px 6px rgba(42, 120, 214, 0.14);
+}
 .status-group { display: flex; gap: 6px; margin-left: auto; flex-wrap: wrap; justify-content: flex-end; align-items: center; }
 .devices { display: flex; gap: 6px; margin: 0; padding: 0; list-style: none; flex-wrap: wrap; justify-content: flex-end; }
 .device {
@@ -131,12 +160,13 @@ h3 { font-size: 14px; font-weight: 650; }
 .chip-btn {
   font: inherit; font-weight: 600; font-size: 11.5px;
   padding: 2px 9px; margin-right: -6px;
-  border: 1px solid var(--border); border-radius: 999px;
-  background: transparent; color: var(--ink); cursor: pointer;
+  border: 1px solid color-mix(in srgb, var(--accent) 35%, transparent); border-radius: 999px;
+  background: var(--accent-soft); color: var(--accent-text); cursor: pointer;
+  transition: background-color 0.12s, border-color 0.12s, transform 0.06s;
 }
-.chip-btn:hover { background: var(--surface-2); }
+.chip-btn:hover:not(:disabled) { background: color-mix(in srgb, var(--accent) 22%, transparent); border-color: var(--accent); }
 .chip-btn:not(:last-child) { margin-right: 0; }
-.chip-btn:disabled { opacity: 0.5; cursor: default; }
+.chip-btn:disabled { opacity: 0.5; cursor: default; background: transparent; color: var(--muted); border-color: var(--border); }
 
 @media (max-width: 760px) {
   .topbar { height: auto; flex-wrap: wrap; padding: 10px 16px; gap: 10px; }
@@ -183,7 +213,9 @@ h3 { font-size: 14px; font-weight: 650; }
   gap: 12px; flex-wrap: wrap; margin-bottom: 12px;
 }
 .panel-head p { margin: 2px 0 0; }
-.head-actions { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+/* The heading text gives way (its subtitle wraps) before the buttons drop under it. */
+.panel-head > div:first-child { flex: 1 1 240px; min-width: 0; }
+.head-actions { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; flex: none; }
 
 /* --- Controls ------------------------------------------------------------------- */
 
@@ -208,21 +240,65 @@ input[aria-invalid="true"] { border-color: var(--critical); }
   padding: 7px 14px; border-radius: 8px;
   border: 1px solid transparent; cursor: pointer;
   text-decoration: none; white-space: nowrap;
+  transition: background-color 0.12s, border-color 0.12s, box-shadow 0.12s, transform 0.06s;
 }
+/* Buttons look like buttons: a filled or tinted face, a stronger colour under the pointer, and they move
+   down a little when pressed. */
+.btn:active:not(:disabled), .chip-btn:active:not(:disabled), .icon-btn:active:not(:disabled) { transform: translateY(1px); }
 .btn.small { padding: 4px 10px; font-size: 12.5px; }
-.btn.primary { background: var(--accent); color: var(--accent-ink); }
-.btn.primary:hover:not(:disabled) { filter: brightness(1.08); }
-.btn.ghost { background: transparent; color: var(--ink); border-color: var(--border); }
-.btn.ghost:hover:not(:disabled), .btn.ghost[aria-pressed="true"] { background: var(--surface-2); }
-.btn.danger { background: transparent; color: var(--critical-ink); border-color: var(--critical); }
+.btn.primary { background: var(--accent); color: var(--accent-ink); box-shadow: 0 1px 2px rgba(11, 11, 11, 0.2); }
+.btn.primary:hover:not(:disabled) { filter: brightness(1.08); box-shadow: 0 2px 6px rgba(42, 120, 214, 0.35); }
+.btn.primary:active:not(:disabled) { filter: brightness(0.92); box-shadow: none; }
+.btn.ghost {
+  background: var(--accent-soft); color: var(--accent-text);
+  border-color: color-mix(in srgb, var(--accent) 35%, transparent);
+}
+.btn.ghost:hover:not(:disabled) { background: color-mix(in srgb, var(--accent) 22%, transparent); border-color: var(--accent); }
+.btn.ghost:active:not(:disabled) { background: color-mix(in srgb, var(--accent) 32%, transparent); }
+.btn.ghost[aria-pressed="true"] { background: var(--accent); color: var(--accent-ink); border-color: var(--accent); }
+.btn.danger {
+  background: color-mix(in srgb, var(--critical) 10%, transparent); color: var(--critical-ink);
+  border-color: color-mix(in srgb, var(--critical) 45%, transparent);
+}
+.btn.danger:hover:not(:disabled) { background: color-mix(in srgb, var(--critical) 18%, transparent); border-color: var(--critical); }
+.btn.danger:active:not(:disabled) { background: color-mix(in srgb, var(--critical) 28%, transparent); }
 .btn:disabled { opacity: 0.5; cursor: not-allowed; }
+.btn.ghost:disabled, .btn.danger:disabled { background: transparent; color: var(--muted); border-color: var(--border); }
+
+/* Icons on buttons (data-icon="name"). Drawn here, not as elements inside the button, because the scripts
+   replace a button's text while it works ("Sending…", "Copied"). The icon takes the button's text colour. */
+.btn[data-icon]::before {
+  content: ""; flex: none; width: 15px; height: 15px; background: currentColor;
+  -webkit-mask: var(--icon) center / contain no-repeat; mask: var(--icon) center / contain no-repeat;
+}
+.btn.small[data-icon]::before { width: 13px; height: 13px; }
+[data-icon="plus"] { --icon: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23000' stroke-width='2.2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M12 5v14M5 12h14'/%3E%3C/svg%3E"); }
+[data-icon="folder"] { --icon: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23000' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z'/%3E%3C/svg%3E"); }
+[data-icon="refresh"] { --icon: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23000' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M20 11a8 8 0 1 0-2.3 6.3M20 4v7h-7'/%3E%3C/svg%3E"); }
+[data-icon="send"] { --icon: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23000' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M21 3 10 14M21 3l-7 18-4-7-7-4z'/%3E%3C/svg%3E"); }
+[data-icon="list"] { --icon: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23000' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M9 6h11M9 12h11M9 18h11M4.5 6h.01M4.5 12h.01M4.5 18h.01'/%3E%3C/svg%3E"); }
+[data-icon="code"] { --icon: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23000' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M8 7l-5 5 5 5M16 7l5 5-5 5'/%3E%3C/svg%3E"); }
+[data-icon="play"] { --icon: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23000' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M7 4l12 8-12 8z'/%3E%3C/svg%3E"); }
+[data-icon="review"] { --icon: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23000' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M9 3h6v4H9zM9 5H5v16h14V5h-4M9 14l2 2 4-4'/%3E%3C/svg%3E"); }
+[data-icon="edit"] { --icon: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23000' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M4 20l1-4L16 5l3 3L8 19zM14 7l3 3'/%3E%3C/svg%3E"); }
+[data-icon="stop"] { --icon: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23000' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M6 6h12v12H6z'/%3E%3C/svg%3E"); }
+[data-icon="check"] { --icon: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23000' stroke-width='2.4' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M5 12.5l4.5 4.5L19 7'/%3E%3C/svg%3E"); }
+[data-icon="download"] { --icon: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23000' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M12 4v11M7 10l5 5 5-5M5 20h14'/%3E%3C/svg%3E"); }
+[data-icon="table"] { --icon: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23000' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M4 5h16v14H4zM4 10h16M4 15h16M10 5v14'/%3E%3C/svg%3E"); }
+[data-icon="sparkle"] { --icon: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23000' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M11 3l1.9 5.1L18 10l-5.1 1.9L11 17l-1.9-5.1L4 10l5.1-1.9zM19 15v5M16.5 17.5h5'/%3E%3C/svg%3E"); }
+[data-icon="book"] { --icon: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23000' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M5 4h11a3 3 0 0 1 3 3v13H8a3 3 0 0 1-3-3zM5 17a3 3 0 0 1 3-3h11'/%3E%3C/svg%3E"); }
+[data-icon="copy"] { --icon: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23000' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M9 9h10v11H9zM5 15V4h10'/%3E%3C/svg%3E"); }
+[data-icon="x"] { --icon: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23000' stroke-width='2.2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M6 6l12 12M18 6 6 18'/%3E%3C/svg%3E"); }
+[data-icon="back"] { --icon: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23000' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M19 12H5M11 6l-6 6 6 6'/%3E%3C/svg%3E"); }
+[data-icon="runs"] { --icon: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23000' stroke-width='2.1' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M3 12h4l3-8 4 16 3-8h4'/%3E%3C/svg%3E"); }
 .icon-btn {
   display: grid; place-items: center;
   width: 36px; height: 36px; flex: none;
-  border: 1px solid var(--border); border-radius: 8px;
-  background: transparent; color: var(--ink-2); cursor: pointer;
+  border: 1px solid color-mix(in srgb, var(--accent) 35%, transparent); border-radius: 8px;
+  background: var(--accent-soft); color: var(--accent-text); cursor: pointer;
+  transition: background-color 0.12s, border-color 0.12s, transform 0.06s;
 }
-.icon-btn:hover { background: var(--surface-2); color: var(--ink); }
+.icon-btn:hover { background: color-mix(in srgb, var(--accent) 22%, transparent); border-color: var(--accent); }
 .icon-btn svg { width: 18px; height: 18px; }
 
 .form-error, .run-error {
@@ -322,8 +398,11 @@ input[aria-invalid="true"] { border-color: var(--critical); }
   border: 1px solid var(--border); border-radius: 10px;
   background: var(--surface); color: var(--ink);
   padding: 8px 12px; cursor: pointer;
+  border-left: 3px solid color-mix(in srgb, var(--accent) 55%, transparent);
+  transition: background-color 0.12s, border-color 0.12s, transform 0.06s;
 }
-.suggestion:hover { background: var(--surface-2); }
+.suggestion:hover { background: var(--accent-soft); border-color: var(--accent); }
+.suggestion:active { transform: translateY(1px); background: color-mix(in srgb, var(--accent) 22%, transparent); }
 
 .composer { border-top: 1px solid var(--hairline); padding-top: 10px; display: grid; gap: 8px; }
 .composer.dragging { outline: 2px dashed var(--accent); outline-offset: 4px; border-radius: 8px; }

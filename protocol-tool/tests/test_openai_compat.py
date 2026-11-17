@@ -441,3 +441,93 @@ def test_the_switch_is_shown_in_the_chat_and_kept(settings):
     assert parts[0] == {"type": "notice", "text": "Gemini can't answer right now (its free daily limit is used up), "
                                                   "so Ollama (qwen3:30b) continues."}
     assert parts[1] == {"type": "text", "text": "ok"} and not session.transcript[-1].error
+
+
+# --- Context window ------------------------------------------------------------------------
+
+from protocol_tool.fit_context import DROPPED_NOTE, fit  # noqa: E402
+from protocol_tool.openai_compat import _context_window  # noqa: E402
+
+SCRIPT = "# the scientist's script\n" + "x = 1\n" * 4000
+
+
+def long_design():
+    """A design with a big attached script, two protocol versions and several scientist messages."""
+    def state(n):
+        return {"type": "text", "text": f"<design_state>\nstate {n} " + "s" * 2000 + "\n</design_state>"}
+
+    def write(n, code):
+        return {"role": "assistant", "content": [{"type": "tool_use", "id": f"w{n}", "name": "write_protocol",
+                                                  "input": {"protocol_id": "main", "code": code}}]}
+
+    return [
+        {"role": "user", "content": [
+            {"type": "document", "title": "bsa.py", "source": {"type": "text", "media_type": "text/plain", "data": SCRIPT}},
+            state(1), {"type": "text", "text": "only run step 6"}]},
+        write(1, "# version 1\n" + "a = 1\n" * 1500),
+        {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "w1", "content": "simulated: " + "r" * 3000}]},
+        {"role": "assistant", "content": [{"type": "text", "text": "Done."}]},
+        {"role": "user", "content": [state(2), {"type": "text", "text": "use the original speed"}]},
+        write(2, "# version 2\n" + "b = 2\n" * 1500),
+        {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "w2", "content": "simulated ok"}]},
+        {"role": "assistant", "content": [{"type": "text", "text": "Updated."}]},
+        {"role": "user", "content": [state(3), {"type": "text", "text": "hi"}]},
+    ]
+
+
+def too_long(used, limit):
+    message = f"request ({used} tokens) exceeds the available context size ({limit} tokens), try increasing it"
+    return 400, json.dumps({"error": {"code": 400, "message": message, "type": "exceed_context_size_error"}}).encode()
+
+
+def stream_once(model, messages):
+    async def go():
+        return [e async for e in model.stream([{"type": "text", "text": "SYSTEM"}], [], messages)]
+
+    return asyncio.run(go())
+
+
+def test_a_conversation_longer_than_the_models_window_is_shortened():
+    messages = long_design()
+    full = len(json.dumps(to_openai_messages([{"type": "text", "text": "SYSTEM"}], messages)))
+    # The server counts 3 characters a token and reads at most a third of this conversation.
+    api = FakeChatAPI(too_long(full // 3, full // 9 + 2048), (200, OK), (200, OK))
+    model = OpenAICompatModel(OLLAMA, httpx.MockTransport(api))
+
+    events = stream_once(model, messages)
+    assert any(e.get("type") == "status" and "shortened" in e["label"] for e in events if isinstance(e, dict))
+    assert events[-1].content == [{"type": "text", "text": "ok"}]
+    sent = json.dumps(api.requests[1]["messages"])
+    assert len(sent) <= full // 3
+    assert "the scientist's script" not in sent and "bsa.py" in sent  # the file is named, not sent
+    assert "state 3" in sent and "state 1" not in sent  # only the current design state
+    assert "version 2" in sent and "version 1" not in sent  # only the latest protocol code
+    assert "hi" in sent
+    assert messages == long_design()  # the saved conversation is unchanged
+
+    stream_once(model, messages)  # now known: shortened before sending, so one request
+    assert len(api.requests) == 3 and len(json.dumps(api.requests[2]["messages"])) <= full // 3
+
+
+def test_oldest_exchanges_go_last_and_the_latest_message_always_stays():
+    messages = long_design()
+    kept = fit(messages, lambda m: len(json.dumps(m)) < 3000)
+    assert len(kept) == 1 and kept[0]["content"][0]["text"] == DROPPED_NOTE
+    assert kept[0]["content"][1:] == messages[-1]["content"]  # the latest message, as it was
+    assert fit(messages, lambda m: False) is None
+
+
+def test_a_conversation_too_long_even_when_shortened_says_so():
+    api = FakeChatAPI(too_long(90000, 4096), (400, b"{}"))
+    with pytest.raises(ModelError) as error:
+        stream_once(OpenAICompatModel(OLLAMA, httpx.MockTransport(api)), long_design())
+    assert "too long for" in str(error.value) and "New design" in str(error.value)
+
+
+@pytest.mark.parametrize("message, window", [
+    ("request (68256 tokens) exceeds the available context size (65536 tokens), try increasing it", (65536, 68256)),
+    ("This model's maximum context length is 32768 tokens. However, you requested 33000 tokens", (32768, 33000)),
+    ("Invalid 'messages': must not be empty", None),
+])
+def test_context_window_errors_are_read(message, window):
+    assert _context_window(message) == window

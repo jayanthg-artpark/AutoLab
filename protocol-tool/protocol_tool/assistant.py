@@ -35,6 +35,7 @@ from pydantic import TypeAdapter, ValidationError
 from .analysis import describe_results
 from .config import Settings
 from .experiments import FOLDER as EXPERIMENTS, RATING_LABEL
+from .given import SlotMoveError, move_slots
 from .knowledge import FOLDERS, Knowledge
 from .model_status import ModelAuthError, ModelChecker, ModelError, ModelNotFound, auth_problem, load_key_file, masked_key
 from .models import (
@@ -44,7 +45,7 @@ from .models import (
 from .providers import Provider, fallbacks, resolve
 from .simulator import DeckRules, SimulatorUnavailable, simulate
 from .store import SessionStore
-from .workflow import WorkflowError, build_submission, describe_plan
+from .workflow import WorkflowError, build_submission, describe_plan, liquid_protocols, shared_tubes
 
 log = logging.getLogger(__name__)
 
@@ -165,6 +166,36 @@ def build_tools(rules: DeckRules) -> list[dict[str, Any]]:
             },
         },
         {
+            "name": "use_given_protocol",
+            "description": (
+                "Use a complete Opentrons protocol file the scientist attached (e.g. from Protocol Designer) exactly as "
+                "it is: the file is taken byte for byte, never retyped. The only change allowed is moving labware to "
+                "other deck slots with slot_moves, when the check says a slot can't be used. Simulates it like "
+                "write_protocol; the lab's own pipetting and design rules come back as warnings, not errors."
+            ),
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "protocol_id": {"type": "string", "description": "Short id, as in write_protocol"},
+                    "file": {"type": "string", "description": "The attached file's name, e.g. 'bsa_curve.py'"},
+                    "title": {"type": "string"},
+                    "summary": {"type": "string", "description": "One to three sentences on what the protocol does"},
+                    "plate_slot": {
+                        "type": "string", "enum": list(rules.thor_slots),
+                        "description": "Deck slot of the sample plate, after any slot_moves",
+                    },
+                    "slot_moves": {
+                        "type": "object", "additionalProperties": {"type": "string"},
+                        "description": (
+                            "Labware to put in another slot, from -> to, e.g. {\"A1\": \"C3\"}: everything the protocol "
+                            "loads in A1 goes in C3. Leave out (or {}) to use the file unchanged."
+                        ),
+                    },
+                },
+                "required": ["protocol_id", "file", "title", "summary", "plate_slot"],
+            },
+        },
+        {
             "name": "set_workflow",
             "description": (
                 "Set the whole workflow: the ordered steps done to the sample plate (the protocol IR). "
@@ -238,7 +269,9 @@ def build_tools(rules: DeckRules) -> list[dict[str, Any]]:
                                 },
                                 "samples": {
                                     "type": "array",
-                                    "description": "standard_curve: unknowns to read off the curve; group_comparison: the groups",
+                                    "description": ("standard_curve: unknowns to read off the curve (leave empty for a plate "
+                                                    "of standards only: the curve, its equation and R² are still plotted); "
+                                                    "group_comparison: the groups"),
                                     "items": {"type": "object", "properties": {
                                         "name": {"type": "string"}, "wells": {"type": "array", "items": {"type": "string"}},
                                         "dilution": {"type": "number", "description": "fold dilution before reading; results are multiplied back"},
@@ -298,6 +331,9 @@ Only the sample plate travels with Thor. Everything else on the Flex deck (tips,
 5. Fix what the checks report. write_protocol runs the Opentrons simulator; set_workflow has the master node select instruments and check safety limits. If either fails, fix it and call it again. Act on warnings too.
 6. The scientist reviews the planned run and approves it before anything goes to the lab. You cannot start runs; never say a run has started.
 
+## Protocols the scientist gives
+When the scientist attaches a complete Opentrons protocol (.py, e.g. exported from Protocol Designer or one that already works) to run, run that protocol, not your own version: call use_given_protocol with the file's name instead of write_protocol, and never retype, reformat, "fix" or improve it. The only change you may make is moving labware to other deck slots (slot_moves), and only when the check fails on a slot (e.g. one that must stay empty for Thor) or the sample plate must sit where Thor can reach it. The lab's pipetting and design rules come back as warnings for a given protocol: tell the scientist about them briefly and leave the protocol unchanged. Change the protocol itself only if the scientist asks you to; then write it with write_protocol, and the lab's rules apply in full. Still set the workflow and analysis around it as usual.
+
 ## The Flex deck
 {deck_rules}
 
@@ -309,7 +345,7 @@ Protocol rules:
 - Load the sample plate directly on the deck (not on a module or adapter) in one of the slots Thor can reach, and give that slot as plate_slot. Thor collects it from there afterwards, so never move it elsewhere.
 - Runs are unattended: no `protocol.pause()`, no manual steps. Incubations away from the Flex are hold steps in the workflow, not delays in the protocol, unless they are short.
 - Declare starting reagents with `protocol.define_liquid()` and `well.load_liquid()`, and give labware readable labels (`label=`), so the deck view shows what goes where.
-- Tip racks stay on the Flex between runs, and the lab continues partly used racks automatically: each pipette starts at its rack's next unused tip. Reuse the tip racks listed in <design_state> (same slot and type) when they suit the experiment, and never put other labware where a tip rack is. write_protocol simulates the protocol starting from the tips left on the deck (after any runs queued ahead), exactly as the run will, and reports how many tips each rack has before and after. Add a rack only when it says so: for a tip size that isn't on the deck, or when a pipette runs out of tips; then load a rack of that type in a free slot and list it after the existing one in tip_racks=[...] (staff put a full rack there), and tell the scientist. Remove any rack the simulation says is never used. Tell the scientist how many tips the run takes and what is left after it.
+{tip_rules}
 - Let pipettes take tips automatically (`pick_up_tip()` without a location, or `new_tip=` in transfer/distribute); never name specific tip wells or set `starting_tip`. Give each pipette its own tip rack(s).
 
 ## Plate reader (Tecan Infinite M200 Pro)
@@ -325,6 +361,26 @@ Instrument limits in <design_state> can be narrower; they win.
 - The scientist sees the requirements, the protocol code, the deck and the workflow beside the chat, so don't paste code into your reply. Reply briefly: what you designed or changed, the assumptions you made, any open questions, and what lab staff must prepare (reagents and volumes to load, where labware goes).
 - Each scientist message starts with a <design_state> block: the current requirements, protocols, workflow (with step ids), the lab's instruments and their limits, the tip racks on the Flex and the knowledge documents. The scientist can edit read settings by hand; that block reflects their edits.
 """
+
+# How tip racks are handled, by the lab's fresh_tip_racks setting (one of the protocol rules).
+KEPT_TIP_RULES = (
+    "- Tip racks stay on the Flex between runs, and the lab continues partly used racks automatically: each pipette "
+    "starts at its rack's next unused tip. Reuse the tip racks listed in <design_state> (same slot and type) when they "
+    "suit the experiment, and never put other labware where a tip rack is. write_protocol simulates the protocol "
+    "starting from the tips left on the deck (after any runs queued ahead), exactly as the run will, and reports how "
+    "many tips each rack has before and after. Add a rack only when it says so: for a tip size that isn't on the deck, "
+    "or when a pipette runs out of tips; then load a rack of that type in a free slot and list it after the existing "
+    "one in tip_racks=[...] (staff put a full rack there), and tell the scientist. Remove any rack the simulation says "
+    "is never used. Tell the scientist how many tips the run takes and what is left after it."
+)
+FRESH_TIP_RULES = (
+    "- Every run starts with full tip racks: staff put fresh racks on the Flex before each run, so each pipette starts "
+    "at A1 of its first rack. Don't carry over racks from earlier designs or runs: load, in free slots, only the racks "
+    "this protocol needs (one of each tip size it uses, and another of that size only when write_protocol says a "
+    "pipette runs out), and remove any rack the simulation says is never used. Protocols later in the same workflow "
+    "continue the racks the earlier ones used. Tell the scientist which full racks go where and how many tips the "
+    "run takes."
+)
 
 EXPLAIN_PROMPT = """\
 You summarise runs from an automated lab for the scientist who ran them. You get the run's steps, \
@@ -561,7 +617,8 @@ class Assistant:
         self._rules = DeckRules.from_settings(lab, settings.simulator.python)
         self._tools = build_tools(self._rules)
         prompt = SYSTEM_PROMPT.format(deck_rules=self._rules.describe(), inventory=lab.inventory,
-                                      api_level=self._rules.api_level or "2.31")
+                                      api_level=self._rules.api_level or "2.31",
+                                      tip_rules=FRESH_TIP_RULES if self._rules.fresh_tip_racks else KEPT_TIP_RULES)
         self._system = [{"type": "text", "text": prompt, "cache_control": {"type": "ephemeral"}}]
 
     async def _simulate_with_full_racks(self, design, protocol: ProtocolDraft) -> Simulation:
@@ -569,6 +626,7 @@ class Assistant:
         return await simulate(
             protocol.code, protocol.plate_slot,
             python=self._settings.simulator.python, timeout_s=self._settings.simulator.timeout_s, rules=self._rules,
+            given=bool(protocol.given),
         )
 
     def is_busy(self, session_id: str) -> bool:
@@ -603,6 +661,9 @@ class Assistant:
     async def _turn(self, session: Session, text: str, attachments: list[Attachment]):
         user = ChatEntry(role="user", text=text, attachments=[a.name for a in attachments])
         session.transcript.append(user)
+        for a in attachments:  # kept byte for byte, so use_given_protocol never relies on the model retyping them
+            if a.name.lower().endswith(".py") and len(a.data) <= MAX_CODE_CHARS:
+                session.files[a.name] = a.data.decode("utf-8", errors="replace")
         racks = await self._tip_racks() if self._tip_racks else None
         instruments = await self._instruments() if self._instruments else None
         knowledge = await asyncio.to_thread(self._knowledge.describe) if self._knowledge else "none"
@@ -737,6 +798,8 @@ class Assistant:
                 content, activity = await asyncio.to_thread(self._read_knowledge, args)
             elif name == "write_protocol":
                 content, activity = await self._write_protocol(session, args)
+            elif name == "use_given_protocol":
+                content, activity = await self._use_given_protocol(session, args)
             elif name == "set_workflow":
                 content, activity = await self._set_workflow(session, args)
             elif name == "set_analysis":
@@ -817,6 +880,41 @@ class Assistant:
             )
         if len(code) > MAX_CODE_CHARS:
             raise ToolInputError(f"The protocol is longer than {MAX_CODE_CHARS} characters")
+        return await self._save_protocol(session, protocol_id, code, title, summary, plate_slot)
+
+    async def _use_given_protocol(self, session: Session, args: dict[str, Any]) -> tuple[str, ToolActivity]:
+        name = str(args.get("file") or "").strip()
+        if name not in session.files:
+            attached = ", ".join(session.files) or "none"
+            raise ToolInputError(f"No attached protocol file '{name}'. Attached .py files: {attached}")
+        plate_slot = args.get("plate_slot")
+        if plate_slot not in self._rules.thor_slots:
+            raise ToolInputError(
+                f"plate_slot must be one of {', '.join(self._rules.thor_slots)}: the slots where Thor can place the sample "
+                "plate (move the plate there with slot_moves if the file puts it elsewhere)"
+            )
+        moves = args.get("slot_moves") or {}
+        if not isinstance(moves, dict):
+            raise ToolInputError("slot_moves must be an object, e.g. {\"A1\": \"C3\"}")
+        try:
+            code = move_slots(session.files[name], moves) if moves else session.files[name]
+        except SlotMoveError as exc:
+            raise ToolInputError(str(exc)) from exc
+        protocol_id = str(args.get("protocol_id") or "main").strip().lower()
+        result, activity = await self._save_protocol(
+            session, protocol_id, code, args.get("title"), args.get("summary"), plate_slot,
+            given=name, slot_moves={str(a).upper(): str(b).upper() for a, b in moves.items()},
+        )
+        moved = ", ".join(f"{a} -> {b}" for a, b in moves.items())
+        note = (f"Used {name} as given" + (f", with labware moved {moved}" if moved else ", unchanged")
+                + ". Don't rewrite it: tell the scientist the warnings and leave the protocol as it is unless they ask.")
+        activity.name = "use_given_protocol"
+        return note + "\n" + result, activity
+
+    async def _save_protocol(
+        self, session: Session, protocol_id: str, code: str, title: Any, summary: Any, plate_slot: str,
+        given: str = "", slot_moves: dict[str, str] | None = None,
+    ) -> tuple[str, ToolActivity]:
         design = session.design
         protocol = design.protocol(protocol_id)
         if protocol is None:
@@ -826,6 +924,7 @@ class Assistant:
                 raise ToolInputError("protocol_id must be 1-32 lowercase letters, digits, '-' or '_'") from None
             design.protocols.append(protocol)
         protocol.code = code
+        protocol.given, protocol.slot_moves = given, slot_moves or {}
         protocol.title = str(title or protocol.title)[:120]
         protocol.summary = str(summary or "")[:1000]
         protocol.version += 1
@@ -852,7 +951,47 @@ class Assistant:
             activity = ToolActivity(name="write_protocol", ok=True, summary=f"{label}: simulation passed ({sim.stats.get('commands', 0)} commands)")
         else:
             activity = ToolActivity(name="write_protocol", ok=False, summary=f"{label}: simulation failed: {sim.errors[0] if sim.errors else 'unknown error'}")
-        return describe_simulation(sim, protocol.version, protocol_id), activity
+        result = describe_simulation(sim, protocol.version, protocol_id)
+        later = await self._resimulate_workflow(session, after=protocol_id)
+        if later:
+            result += "\n" + later
+        return result, activity
+
+    async def _resimulate_workflow(self, session: Session, after: str | None = None) -> str:
+        """Simulates the workflow's liquid-handling protocols again in workflow order (all of them, or those after
+        `after`): each continues the tip racks the ones before it used, as the run will. Text about the ones that
+        now fail; "" when they all pass or there is nothing to check."""
+        ordered = liquid_protocols(session.design)
+        if after is not None:
+            ids = [p.id for p in ordered]
+            if after not in ids:
+                return ""
+            ordered = ordered[ids.index(after) + 1:]
+        elif len(ordered) < 2:
+            return ""  # one protocol was already simulated from full racks
+        failed = []
+        for p in ordered:
+            if not p.code:
+                continue
+            try:
+                p.simulation = await self._simulate_protocol(session.design, p)
+            except SimulatorUnavailable:
+                return ""
+            self._store.save(session)
+            if not p.simulation.ok:
+                failed.append(f"- {p.id}: {p.simulation.errors[0] if p.simulation.errors else 'failed'}")
+        out = []
+        if failed:
+            out.append("Simulated the workflow's protocols again in run order (each starts where the ones before it left "
+                       "the tip racks, as the run will). These now FAIL:\n" + "\n".join(failed) + "\nThe whole workflow "
+                       "runs with the tip racks staff put on the deck before it starts: if it needs more tips than its "
+                       "racks hold, load more racks in free slots (one protocol's rack slots are shared by every "
+                       "protocol in the run), or use fewer tips.")
+        if clashes := shared_tubes(session.design):
+            out.append("One tube, two liquids: " + "; ".join(clashes) + ". The protocols of a run share one deck, and a "
+                       "tube keeps what an earlier protocol left in it: put each liquid in its own tube (if it really is "
+                       "the same liquid, give it the same name in both protocols).")
+        return "\n".join(out)
 
     async def _set_workflow(self, session: Session, args: dict[str, Any]) -> tuple[str, ToolActivity]:
         raw = args.get("steps")
@@ -891,6 +1030,9 @@ class Assistant:
         flow = " → ".join(s.label or s.type.replace("_", " ") for s in steps)
         result = [f"Workflow saved: {len(steps)} steps ({flow})."]
         ok = True
+        if failures := await self._resimulate_workflow(session):
+            ok = False
+            result.append(failures)
         verdict, detail = await self._check_with_lab(session)
         if verdict == "planned":
             result.append(f"The master node planned it as:\n{detail}")
@@ -899,7 +1041,8 @@ class Assistant:
             result.append(f"The master node REJECTED it: {detail}\nFix the workflow (or the instruments it names) and call set_workflow again.")
         else:
             result.append(f"Not checked against the lab yet: {detail}")
-        summary = f"Workflow: {len(steps)} steps ({flow})" if ok else f"Workflow rejected by the master node: {detail}"
+        summary = (f"Workflow: {len(steps)} steps ({flow})" if ok else f"Workflow rejected by the master node: {detail}"
+                   if verdict == "rejected" else f"Workflow: {len(steps)} steps; some protocols fail in run order")
         return "\n".join(result), ToolActivity(name="set_workflow", ok=ok, summary=summary[:300])
 
     async def _check_with_lab(self, session: Session) -> tuple[str, str]:
@@ -1053,8 +1196,9 @@ class Assistant:
             "Workflow:\n" + ("\n".join(workflow) or "not set yet") + "\n"
             "Result analysis:\n" + ("\n".join(analyses) or "not set yet") + "\n"
             f"Lab instruments (registry):\n{_describe_instruments(instruments)}\n"
-            f"Tip racks on the Flex now: {_describe_racks(racks)}\n"
-            f"Knowledge documents: {knowledge}\n"
+            + ("Tip racks: full racks every run (staff put fresh ones in before each run)\n" if self._rules.fresh_tip_racks
+               else f"Tip racks on the Flex now: {_describe_racks(racks)}\n")
+            + f"Knowledge documents: {knowledge}\n"
             "</design_state>"
         )
 
@@ -1177,6 +1321,8 @@ def describe_tips(sim) -> list[str]:
         return []
     if sim.tip_state is None:
         head = "Tips (the tip racks on the deck are unknown, so this assumed full racks):"
+    elif not any(sim.tip_state.values()) and not sim.runs_ahead:
+        head = "Tips, starting from full racks:"
     else:
         ahead = f" after the {sim.runs_ahead} run{'s' * (sim.runs_ahead != 1)} queued ahead" if sim.runs_ahead else ""
         head = f"Tips, starting from what is left on the deck{ahead}:"

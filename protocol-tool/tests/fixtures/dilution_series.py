@@ -34,10 +34,15 @@ def run(protocol: protocol_api.ProtocolContext):
     volume = protocol.params.volume_ul
     diluent, stock = reservoir["A1"], reservoir["A2"]
 
-    # Diluent into columns 2-12, stock into column 1.
-    pipette.transfer(volume, diluent, [w for col in plate.columns()[1:] for w in col])
-    pipette.transfer(volume * 2, stock, plate.columns()[0])
+    # Diluent into columns 2-12, stock into column 1: into empty wells from above, one tip each.
+    pipette.transfer(volume, diluent, [w.bottom(z=12) for col in plate.columns()[1:] for w in col])
+    pipette.transfer(volume * 2, stock, [w.bottom(z=12) for w in plate.columns()[0]])
 
-    # Two-fold serial dilution across each row, mixing after each step.
+    # Two-fold serial dilution across each row, a fresh tip and a mix at the bottom for each step.
     for row in plate.rows():
-        pipette.transfer(volume, row[:11], row[1:], mix_after=(3, volume / 2), new_tip="always")
+        for source, dest in zip(row[:11], row[1:]):
+            pipette.pick_up_tip()
+            pipette.aspirate(volume, source)
+            pipette.dispense(volume, dest.bottom(z=12))
+            pipette.mix(3, volume / 2, dest.bottom(z=1))
+            pipette.drop_tip()

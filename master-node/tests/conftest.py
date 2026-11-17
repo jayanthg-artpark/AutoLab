@@ -86,6 +86,7 @@ def settings(tmp_path) -> Settings:
     s = Settings()
     s.server.database = str(tmp_path / "runs.db")
     s.server.instruments = str(tmp_path / "no-instruments.toml")
+    s.server.fresh_tip_racks = False  # the tip tests cover both; most continue racks between runs
     s.sim.time_scale = 0.001
     return s
 

@@ -124,7 +124,7 @@ def create_app(
         return await simulate(
             protocol.code, protocol.plate_slot, python=settings.simulator.python, timeout_s=settings.simulator.timeout_s,
             rules=DeckRules.from_settings(settings.lab, settings.simulator.python),
-            deck_tips=tips or await deck_tips(design, protocol),
+            deck_tips=tips or await deck_tips(design, protocol), given=bool(protocol.given),
         )
 
     assistant = Assistant(

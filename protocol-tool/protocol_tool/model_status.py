@@ -226,6 +226,17 @@ class OpenAICompatChecker(ModelChecker):
             return "no_access", ""
         if response.status_code == 429:
             return "ready", f"{p.model} (currently rate-limited)"
+        if response.status_code == 404 or response.status_code >= 500:
+            # Some servers (or the tunnel in front of them) don't list their models but do answer chats:
+            # ask the model for one token instead.
+            try:
+                async with httpx.AsyncClient(timeout=60, transport=self._transport) as client:
+                    chat = await client.post(f"{p.url}/chat/completions", headers=headers, json={
+                        "model": p.model, "max_tokens": 1, "messages": [{"role": "user", "content": "hi"}]})
+            except httpx.HTTPError:
+                chat = None
+            if chat is not None and chat.is_success:
+                return "ready", f"{p.model} is available (it answers chats; the server doesn't list its models)"
         if response.is_error:
             return "error", f"{p.label} answered {response.status_code}: {response.text[:200]}"
         try:

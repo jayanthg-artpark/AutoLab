@@ -22,7 +22,7 @@ from typing import Any
 import numpy as np
 from scipy import optimize, stats
 
-from .models import Analysis, WellGroup
+from .models import MIN_POINTS, Analysis, WellGroup
 
 CURVE_POINTS = 120
 
@@ -102,11 +102,12 @@ def _5pl(x, a, b, c, d, g):
 class Fit:
     def __init__(self, model: str, params: dict[str, float], predict, inverse, equation: str):
         self.model, self.params, self.predict, self.inverse, self.equation = model, params, predict, inverse, equation
-        self.r2: float | None = None
+        self.r2: float | None = None  # over every well
+        self.r2_means: float | None = None  # a fit to the replicate means, when there are replicates
 
     def view(self) -> dict[str, Any]:
         out = {"model": self.model, "params": {k: _round(v) for k, v in self.params.items()},
-               "equation": self.equation, "r2": _round(self.r2)}
+               "equation": self.equation, "r2": _round(self.r2), "r2_means": _round(self.r2_means)}
         if self.model in ("4pl", "5pl"):
             out["ec50"] = _round(self.params["c"])
         if self.model == "log_linear":
@@ -224,6 +225,14 @@ def _series(name: str, groups: list[WellGroup], values: dict[str, float], analys
     except AnalysisError as exc:
         notes.append(f"{name}: {exc}")
         return series
+    if any(p["n"] > 1 for p in points) and len(points) >= MIN_POINTS.get(analysis.fit, 2):
+        # The same fit to the replicate means (how a curve is often plotted by hand): its R² shows how well
+        # the levels line up, without the scatter between replicate wells.
+        try:
+            fit.r2_means = fit_curve(analysis.fit, np.array([p["x"] for p in points], dtype=float),
+                                     np.array([p["y"] for p in points], dtype=float)).r2
+        except AnalysisError:
+            pass
     series["_fit"] = fit
     series["fit"] = fit.view()
     lo, hi = min(p["x"] for p in points), max(p["x"] for p in points)
@@ -233,7 +242,8 @@ def _series(name: str, groups: list[WellGroup], values: dict[str, float], analys
         grid = np.linspace(lo, hi, CURVE_POINTS)
     series["curve"] = [{"x": _round(float(x)), "y": _round(float(fit.predict(x)))} for x in grid]
     if fit.r2 is not None and fit.r2 < 0.98 and analysis.kind == "standard_curve":
-        notes.append(f"{name}: R² {fit.r2:.3f} is below 0.98; check the standards before trusting the results")
+        means = f" ({fit.r2_means:.3f} on the replicate means)" if fit.r2_means is not None else ""
+        notes.append(f"{name}: R² {fit.r2:.3f} over all wells{means} is below 0.98; check the standards before trusting the results")
     return series
 
 
@@ -327,7 +337,8 @@ def describe_results(analyses: list[dict[str, Any]], header: str = "") -> list[s
         lines.append(f"Analysis '{a['title']}' ({a['kind']}{header}):")
         for s in a["series"]:
             if s.get("fit"):
-                lines.append(f"- {s['name']}: {s['fit']['equation']}, R² {s['fit']['r2']}"
+                lines.append(f"- {s['name']}: {s['fit']['equation']}, R² {s['fit']['r2']} (all wells)"
+                             + (f", R² {s['fit']['r2_means']} (replicate means)" if s['fit'].get('r2_means') is not None else "")
                              + (f", EC50 {s['fit']['ec50']}" if s['fit'].get('ec50') is not None else "")
                              + (f", efficiency {s['fit']['efficiency_percent']}%" if s['fit'].get('efficiency_percent') is not None else ""))
         for r in a["samples"]:
@@ -348,7 +359,7 @@ def analysis_csv(run_id: str, analyses: list[dict[str, Any]]) -> str:
     buffer = io.StringIO()
     w = csv.writer(buffer)
     w.writerow(["run_id", "analysis", "kind", "row_type", "name", "series", "x", "signal_mean", "signal_sd", "n",
-                "result", "result_sd", "cv_percent", "fold_change", "p_value", "flag", "wells", "fit", "r2", "ec50", "efficiency_percent"])
+                "result", "result_sd", "cv_percent", "fold_change", "p_value", "flag", "wells", "fit", "r2", "ec50", "efficiency_percent", "r2_means"])
     for a in analyses:
         if a.get("error"):
             w.writerow([run_id, a["title"], "", "error", a["error"]])
@@ -356,7 +367,8 @@ def analysis_csv(run_id: str, analyses: list[dict[str, Any]]) -> str:
         for s in a["series"]:
             fit = s.get("fit") or {}
             w.writerow([run_id, a["title"], a["kind"], "fit", s["name"], s["name"], "", "", "", "", "", "", "", "", "", "", "",
-                        fit.get("equation", ""), fit.get("r2", ""), fit.get("ec50", ""), fit.get("efficiency_percent", "")])
+                        fit.get("equation", ""), fit.get("r2", ""), fit.get("ec50", ""), fit.get("efficiency_percent", ""),
+                        "" if fit.get("r2_means") is None else fit["r2_means"]])
             for p in s["points"]:
                 w.writerow([run_id, a["title"], a["kind"], "point", p["name"], s["name"], p["x"], _round(p["y"]), _round(p["sd"]),
                             p["n"], "", "", p["cv"], "", "", "", " ".join(p["wells"])])

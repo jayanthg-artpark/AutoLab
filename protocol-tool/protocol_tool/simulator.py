@@ -12,6 +12,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import math
 import os
 import re
 import subprocess
@@ -51,7 +52,16 @@ DEEP_WELL_MM = 60
 # Bump when the checks or what a simulation reports change, so stored designs are simulated again
 # before they are sent. 2: aspirating from tubes at the liquid surface, and where liquid goes.
 # 3: multi-channel pipettes only in plates and reservoirs. 4: tips reach only their length into tubes and wells.
-CHECKS_VERSION = 4
+# 5: the lab's pipetting rules (push-out, dispense heights, no pre-wet, no tip carried between filled wells),
+# mixes and push-outs shown in the steps. 6: no volume below the pipette's minimum. 7: small volumes in
+# small tips; no push-out needed under liquid. 8: checked against Opentrons' library protocols: a single-channel
+# nozzle follows its tip into tubes, reach follows plates the gripper moves, multi-channel fit as the Flex centres
+# heads and by the nozzles that hold tips, air gaps and liquid returned to its source aren't transfers.
+# 9: no tip picked up twice from the same spot (the simulator allows it; on the robot the spot is empty).
+# 10: the lab's 1-channel 1000 µL pipette goes down to 2 µL (checked on the robot).
+# 11: 1-10 µL may be pushed out with 2-7 µL (50 µL tips need 5 µL, tested on the robot).
+# 12: less than 10 µL with 50 µL tips needs 20 µL/s, a pause after aspirating and a 5 µL push-out (tested).
+CHECKS_VERSION = 12
 
 # Pipette load names (what protocols write) -> the names the analysis and the robot report.
 PIPETTE_INTERNAL = {
@@ -59,6 +69,19 @@ PIPETTE_INTERNAL = {
     "flex_8channel_50": "p50_multi_flex", "flex_8channel_1000": "p1000_multi_flex",
     "flex_96channel_200": "p200_96", "flex_96channel_1000": "p1000_96",
 }
+
+
+# Volume ranges (µL) of the Flex pipettes, from Opentrons' pipette definitions. A pipette pipettes any volume
+# in its range (with tips that hold it), not only its nominal volume. The 50 µL pipettes go down to 1 µL
+# (up to 30 µL) in low-volume mode, after configure_for_volume() with less than 5 µL.
+# This lab's 1-channel 1000 µL pipette was checked on the robot to dispense 2 µL with 50 µL tips (2026-11-17):
+# lower than Opentrons' 5 µL.
+PIPETTE_RANGE_UL = {
+    "p50_single_flex": (5, 50), "p50_multi_flex": (5, 50), "p1000_single_flex": (2, 1000),
+    "p1000_multi_flex": (5, 1000), "p1000_96": (5, 1000), "p200_96": (5, 200),
+}
+LOW_VOLUME_RANGE_UL = {"p50_single_flex": (1, 30), "p50_multi_flex": (1, 30)}
+LOW_VOLUME_BELOW_UL = 5
 
 
 def _load_name(internal: str) -> str:
@@ -104,6 +127,8 @@ class DeckRules:
     # Pipettes on the robot as (mount, load name); () = not checked. And whether it has a gripper.
     pipettes: tuple[tuple[str, str], ...] = ()
     gripper: bool = True
+    # Staff put full tip racks on the Flex before every run (the master node's fresh_tip_racks).
+    fresh_tip_racks: bool = False
 
     @classmethod
     def from_settings(cls, lab, python: str = "") -> DeckRules:
@@ -115,14 +140,15 @@ class DeckRules:
                 log.warning("API level not checked: %s", exc)
                 level = ""
         return cls(tuple(lab.thor_slots), lab.trash_slot, lab.waste_chute_slot, level, tuple(lab.labware),
-                   tuple(lab.blocked_slots), tuple(sorted(lab.pipettes.items())), lab.gripper)
+                   tuple(lab.blocked_slots), tuple(sorted(lab.pipettes.items())), lab.gripper, lab.fresh_tip_racks)
 
     @property
     def signature(self) -> str:
         """Identifies the rules a simulation was checked against; a change means re-checking."""
         return "|".join([",".join(self.thor_slots), self.trash_slot, self.waste_chute_slot, self.api_level,
                          ",".join(self.labware), ",".join(self.blocked_slots),
-                         ",".join(f"{m}={p}" for m, p in self.pipettes), str(self.gripper), f"checks{CHECKS_VERSION}"])
+                         ",".join(f"{m}={p}" for m, p in self.pipettes), str(self.gripper),
+                         "fresh-tips" if self.fresh_tip_racks else "kept-tips", f"checks{CHECKS_VERSION}"])
 
     def describe(self) -> str:
         """The deck rules as the AI model reads them in its instructions."""
@@ -154,6 +180,21 @@ class DeckRules:
             "opentrons_flex_96_filtertiprack_ versions) and Flex modules, in Flex deck coordinates (A1-D4), never "
             "numbered slots."
         )
+        lines.append(
+            "- Pipette volume ranges (Opentrons' pipette definitions). A pipette handles any volume in its range, not "
+            "only its nominal volume: flex_1channel_1000 takes 2-1000 µL (the lab checked 2 µL with 50 µL tips on its "
+            "robot), flex_8channel_1000 5-1000 µL, and the tip sets the "
+            "accuracy: use the smallest tip that holds the volume (50 µL tips for 2-50 µL, 200 µL tips up to 200 µL, "
+            "1000 µL tips above that). A 1000 µL tip is inaccurate for small volumes, so the check fails less than "
+            "50 µL moved with one: load a 50 µL tip rack next to the 1000 µL rack and pick_up_tip(rack) from the rack "
+            "that fits each step. 2-50 µL with 50 µL tips on the flex_1channel_1000 is fine and there is no higher minimum; flex_1channel_50 and flex_8channel_50 take 5-50 µL, or 1-30 µL in low-volume mode "
+            "(`pipette.configure_for_volume(2)` before `pick_up_tip()`, with the volume you are about to pipette; "
+            "configure_for_volume() resets the flow rates to the defaults, so set flow_rate after it, and don't call it "
+            "for the 1000 µL pipettes, which have no low-volume mode); "
+            "flex_96channel_1000 takes 5-1000 µL. Below a pipette's minimum the liquid stays on the tip, so the check "
+            "fails it: use a 50 µL pipette in low-volume mode, or dilute the stock first so every transfer is at least "
+            "the minimum (e.g. 10 µL of a 1:5 dilution instead of 2 µL of stock)."
+        )
         if self.labware:
             lines.append(f"- Labware you may load (anything else fails the check): {', '.join(self.labware)}.")
         else:
@@ -174,16 +215,47 @@ class DeckRules:
         )
         lines.append(
             f"- Reach: a tip reaches only its own length below the pipette (50 µL tips {TIP_REACH_MM[50]:g} mm, "
-            f"200 µL {TIP_REACH_MM[200]:g} mm, 1000 µL {TIP_REACH_MM[1000]:g} mm). Deeper than that below the top of the "
-            "tube or well, the pipette itself hits it, so the check fails any aspirate or dispense that goes deeper. "
-            "For 15 and 50 mL tubes use 1000 µL tips, plan for the liquid the tips can't reach at the bottom (the "
-            "level must stay within reach for the whole run; tell the scientist how much to put in), and dispense into "
-            "tubes near the top: tube.top(-5)."
+            f"200 µL {TIP_REACH_MM[200]:g} mm, 1000 µL {TIP_REACH_MM[1000]:g} mm). A single-channel pipette's narrow "
+            f"nozzle follows its tip up to {NOZZLE_INTO_TUBE_MM:g} mm into a 15 or 50 mL tube (as Opentrons' own library "
+            "protocols do), so 1000 µL tips reach the bottom of those tubes and 50 or 200 µL tips reach about 80 mm "
+            f"down; into narrower tubes and wells it follows only {NOZZLE_INTO_NARROW_MM:g} mm. A multi-channel head "
+            "doesn't go in at all. Deeper than that the pipette itself hits the tube or well, so the check fails it: "
+            "for 15 and 50 mL tubes use 1000 µL tips."
         )
         lines.append(
             "- Multi-channel pipettes (8- and 96-channel) only go into 96/384-well plates and reservoirs. Tubes (15/50 mL "
             "Falcon, 1.5/2 mL) take a single-channel pipette: only one 8-channel nozzle fits over a tube and the others "
             "hit the rack (the check fails it). Moving a tube's liquid into a reservoir first lets an 8-channel fill a plate."
+        )
+        lines.append(
+            "- Pipetting (the check fails anything else):\n"
+            "  - Never pre-wet tips: no pre_wet=True and no extra aspirate/dispense cycles to wet a tip.\n"
+            f"  - {SMALL_DISPENSE_UL[0]}-{SMALL_DISPENSE_UL[1]} µL into a plate well: dispense {SMALL_DISPENSE_Z_MM:g} mm above "
+            f"the bottom with a push-out, `pipette.aspirate(10, source)` then "
+            f"`pipette.dispense(10, well.bottom(z={SMALL_DISPENSE_Z_MM:g}), push_out={PUSH_OUT_UL:g})`: {PUSH_OUT_UL:g} µL with "
+            f"1000 µL tips, {PUSH_OUT_50_UL:g} µL with 50 µL tips (the check takes {PUSH_OUT_RANGE_UL[0]:g}-"
+            f"{PUSH_OUT_RANGE_UL[1]:g} µL). Tested on this lab's Flex: with 50 µL tips, a 2 µL drop stays on the tip with "
+            f"2 µL of push-out and comes off with 5 µL. Less than {SLOW_BELOW_UL:g} µL with 50 µL tips on the "
+            "flex_1channel_1000 needs the lab's "
+            f"tested small-volume settings (the check fails anything else): flow_rate.aspirate and flow_rate.dispense at "
+            f"{SLOW_FLOW_UL_S:g} µL/s or less (set them after any configure_for_volume(), which resets them), "
+            "protocol.delay(seconds=1) right after each aspirate with the tip still in the liquid, and push_out=5. "
+            "Push-out is air the "
+            "plunger pushes after the liquid: aspirate exactly the volume you dispense, never extra for the push-out, "
+            "and never dispense the push-out as a second dispense. Into a well whose liquid already covers the tip "
+            "(e.g. a few µL into 200 µL of reagent, 1 mm above the bottom), use push_out=0: the liquid takes the drop "
+            "off the tip, and push-out would blow air bubbles into it. That is the surest way to deliver small "
+            "volumes.\n"
+            f"  - More than {LARGE_DISPENSE_UL} µL into a plate well: dispense from above, "
+            f"`well.bottom(z={LARGE_DISPENSE_Z_MM:g})`.\n"
+            "  - Mix with `pipette.mix(repetitions, volume, well.bottom(z=1))`, not with your own aspirate/dispense loops; "
+            "the steps list shows each mix as one step. transfer(mix_after=) mixes where it dispensed, so after a "
+            "dispense from above it would mix air: call pipette.mix at the bottom instead.\n"
+            "  - Tips: one tip may fill several wells from one source (e.g. triplicates of a standard) while they are "
+            "empty, or from above their rim. A tip that goes into liquid (dispensing below the rim into a well that "
+            "already holds liquid, or mixing there) must not go into any other well or back to the source: drop it and "
+            "take a fresh tip. Use a fresh tip for each different source. In a serial dilution the tip may carry on "
+            "from the well it just mixed in."
         )
         if self.pipettes:
             lines.append("- Pipettes on the robot (load exactly these, on these mounts; nothing else): "
@@ -191,6 +263,11 @@ class DeckRules:
         if not self.gripper:
             lines.append("- There is no gripper: never call move_labware with use_gripper=True.")
         return "\n".join(lines)
+
+
+# flex_problems that only say how the lab writes protocols (a given protocol keeps them as warnings).
+LAB_PREFERENCES = ("Use the lab's Opentrons API level", )
+LABWARE_LIST = "is not on the lab's Flex labware list"
 
 
 def flex_problems(analysis: dict[str, Any], commands: list[dict[str, Any]], rules: DeckRules) -> list[str]:
@@ -241,7 +318,7 @@ def flex_problems(analysis: dict[str, Any], commands: list[dict[str, Any]], rule
                 "(or the opentrons_flex_96_filtertiprack_ versions)."
             )
         elif rules.labware and not any(fnmatchcase(name, pattern) for pattern in rules.labware):
-            problems.append(f"{name} is not on the lab's Flex labware list. Use one of: {', '.join(rules.labware)}.")
+            problems.append(f"{name} {LABWARE_LIST}. Use one of: {', '.join(rules.labware)}.")
     return problems
 
 
@@ -302,13 +379,14 @@ class DeckTips:
 
 async def simulate(
     code: str, plate_slot: str, python: str = "", timeout_s: float = 120, rules: DeckRules | None = None,
-    deck_tips: DeckTips | None = None,
+    deck_tips: DeckTips | None = None, given: bool = False,
 ) -> Simulation:
-    """Simulates the protocol; with `deck_tips`, starting from the tips left on the deck, as the run will."""
+    """Simulates the protocol; with `deck_tips`, starting from the tips left on the deck, as the run will.
+    `given`: a protocol the scientist gave to run as it is (see parse_analysis)."""
     started = time.monotonic()
     run_code = deck_tips.run_code if deck_tips else code
     analysis = await asyncio.to_thread(_run_analysis, run_code, python or sys.executable, timeout_s)
-    sim = parse_analysis(analysis, code, plate_slot, rules, deck_tips)
+    sim = parse_analysis(analysis, code, plate_slot, rules, deck_tips, given)
     sim.duration_s = round(time.monotonic() - started, 2)
     return sim
 
@@ -348,20 +426,30 @@ def _run_analysis(code: str, python: str, timeout_s: float, attempts: int = 3) -
 
 def parse_analysis(
     analysis: dict[str, Any], code: str, plate_slot: str, rules: DeckRules | None = None,
-    deck_tips: DeckTips | None = None,
+    deck_tips: DeckTips | None = None, given: bool = False,
 ) -> Simulation:
+    """`given`: the scientist gave this protocol to run as it is. Only what would stop or endanger the run
+    fails it (simulator errors, deck slots Thor needs or fixtures, pipettes the robot doesn't have, a
+    multi-channel head in labware it doesn't fit); the lab's other rules become warnings, since the protocol
+    may change only by moving labware between slots."""
     commands: list[dict[str, Any]] = analysis.get("commands", [])
     deck = _build_deck(analysis, commands, code)
     # A protocol that breaks the lab's deck rules fails like a simulator error, so it can't be sent.
     tips, tip_problems, tip_racks = _tip_use(analysis, commands, deck, deck_tips)
     rules = rules or DeckRules()
     errors = [_error_text(e) for e in analysis.get("errors", [])] + deck_problems(deck, plate_slot, rules)
-    errors += flex_problems(analysis, commands, rules) + tip_problems + deep_well_problems(commands)
-    errors += nozzle_problems(analysis, commands) + reach_problems(analysis, commands)
+    flex = flex_problems(analysis, commands, rules)
+    preferences = [p for p in flex if p.startswith(LAB_PREFERENCES) or LABWARE_LIST in p] if given else []
+    errors += ([p for p in flex if p not in preferences] + tip_problems + nozzle_problems(analysis, commands)
+               + tip_spot_problems(commands))
+    preferences += (deep_well_problems(commands) + reach_problems(analysis, commands) + pipetting_problems(code, commands)
+                    + volume_problems(analysis, commands, rules) + small_volume_problems(analysis, commands))
+    if not given:
+        errors += preferences
     if any("OutOfTips" in str(e) or "out of tips" in str(e).lower() for e in analysis.get("errors", [])):
         errors.append(_out_of_tips(tip_racks, deck_tips))
 
-    warnings = []
+    warnings = [f"Given protocol, kept as it is (the lab's designs would differ): {p}" for p in preferences] if given else []
     picked = {r["slot"] for r in tip_racks}
     for slot, contents in deck.slots.items():
         for lw in contents.labware:
@@ -384,7 +472,7 @@ def parse_analysis(
 
     labware_names = {lw.id: lw.display_name for s in deck.slots.values() for lw in s.labware}
     labware_names.update({lw.id: lw.display_name for lw in deck.off_deck})
-    steps = [text for c in commands if (text := _describe(c, labware_names))]
+    steps = _steps(commands, labware_names)
     stats = {
         "commands": len(commands),
         "tips": sum(c.get("commandType") == "pickUpTip" for c in commands),
@@ -439,6 +527,12 @@ def deep_well_problems(commands: list[dict[str, Any]]) -> list[str]:
 # How far each Flex tip reaches below the pipette (tip length less the part on the nozzle), as the analysis reports it.
 TIP_REACH_MM = {50: 47.8, 200: 48.6, 1000: 85.9}
 REACH_CLEARANCE_MM = 2.0  # the pipette must stay this far above the top of what it reaches into
+# A single-channel pipette's nozzle is narrow and follows its tip into a tube: Opentrons' own library protocols
+# take 1000 µL tips to 1 mm above the bottom of 15 mL tubes (31 mm deeper than the tip is long), and 20 µL tips
+# just over 1 mm past their length into 2 mL tubes. Allowed that far, and no further, by how wide the opening is.
+TUBE_OPENING_MM = 14.0          # 15 and 50 mL tubes are at least this wide
+NOZZLE_INTO_TUBE_MM = 33.0      # into those
+NOZZLE_INTO_NARROW_MM = 3.5     # into anything narrower (1.5 and 2 mL tubes, plate wells)
 _ORIGIN_DEPTH = {"bottom": 0.0, "center": 0.5, "top": 1.0}  # well-location origins, as a fraction of the well depth
 
 
@@ -448,29 +542,45 @@ def reach_problems(analysis: dict[str, Any], commands: list[dict[str, Any]]) -> 
     where the tip ends up, following the tracked liquid level for aspirates at the meniscus."""
     names = {p["id"]: p.get("pipetteName", "pipette") for p in analysis.get("pipettes", [])}
     definitions: dict[str, dict[str, Any]] = {}
-    base: dict[str, float] = {}  # labware id -> height of the labware's bottom above the deck
+    # A labware's bottom above the deck, for each place it stands in ((labware id, times moved) -> mm): the
+    # gripper may move a plate between the deck, modules and adapters, which are at different heights.
+    base: dict[tuple[str, int], float] = {}
+    moves: dict[str, int] = {}
+    place: list[tuple[str, int]] = []  # for each command, the labware it works in and its place then
+
+    def on_deck(location: Any) -> bool:
+        return isinstance(location, dict) and bool({"slotName", "addressableAreaName"} & set(location))
+
     for c in commands:
-        result, params = c.get("result") or {}, c.get("params") or {}
-        if c.get("commandType") == "loadLabware" and (result.get("definition") or {}).get("wells"):
-            definitions[result["labwareId"]] = result["definition"]
-            if {"slotName", "addressableAreaName"} & set(params.get("location") or {}):
-                base[result["labwareId"]] = 0.0  # straight on the deck
-    for c in commands:  # on a module or adapter: from a move to a known height in one of its wells
-        result, params = c.get("result") or {}, c.get("params") or {}
-        lw, location = params.get("labwareId", ""), params.get("wellLocation") or {}
-        if (lw in definitions and lw not in base and "z" in (result.get("position") or {})
+        kind, result, params = c.get("commandType"), c.get("result") or {}, c.get("params") or {}
+        lw = params.get("labwareId", "")
+        if kind == "loadLabware" and (result.get("definition") or {}).get("wells"):
+            lw = result["labwareId"]
+            definitions[lw] = result["definition"]
+            moves[lw] = 0
+            if on_deck(params.get("location")):
+                base[(lw, 0)] = 0.0  # straight on the deck
+        elif kind == "moveLabware" and lw in moves:
+            moves[lw] += 1
+            if on_deck(params.get("newLocation")):
+                base[(lw, moves[lw])] = 0.0
+        here = (lw, moves.get(lw, 0))
+        place.append(here)
+        location = params.get("wellLocation") or {}
+        # On a module or adapter: from a move to a known height in one of its wells.
+        if (lw in definitions and here not in base and "z" in (result.get("position") or {})
                 and location.get("origin", "top") in _ORIGIN_DEPTH):
             well = definitions[lw]["wells"].get(params.get("wellName", ""))
             if well:
                 bottom = (result["position"]["z"] - (location.get("offset") or {}).get("z", 0)
                           - _ORIGIN_DEPTH[location.get("origin", "top")] * well["depth"])
-                base[lw] = bottom - well["z"]
+                base[here] = bottom - well["z"]
 
     reach: dict[str, tuple[float, float]] = {}  # pipette -> (reach, tip volume) of the tip it holds
     layouts: dict[str, dict[str, Any]] = {}
     probed: set[tuple[str, str]] = set()
     found: dict[tuple[str, str, str, bool, bool], dict[str, Any]] = {}
-    for c in commands:
+    for c, here in zip(commands, place):
         kind, params, result = c.get("commandType"), c.get("params") or {}, c.get("result") or {}
         pipette, lw, well_name = params.get("pipetteId", ""), params.get("labwareId", ""), params.get("wellName", "")
         if kind == "pickUpTip" and result.get("tipLength"):
@@ -479,7 +589,7 @@ def reach_problems(analysis: dict[str, Any], commands: list[dict[str, Any]]) -> 
             layouts[pipette] = params.get("configurationParams") or {}
         elif kind in ("liquidProbe", "tryLiquidProbe"):
             probed.add((lw, well_name))
-        if kind not in INTO_WELL or lw not in definitions or lw not in base or pipette not in reach:
+        if kind not in INTO_WELL or lw not in definitions or here not in base or pipette not in reach:
             continue
         definition = definitions[lw]
         well = definition["wells"].get(well_name)
@@ -489,13 +599,17 @@ def reach_problems(analysis: dict[str, Any], commands: list[dict[str, Any]]) -> 
         channels = _channels(names.get(pipette, ""))
         _, active = _active_nozzles(channels, layouts.get(pipette))
         bare = len(active) < channels  # nozzles without tips hang over the labware at the pipette's height
-        top = base[lw] + (definition["dimensions"]["zDimension"] if bare else well["z"] + well["depth"])
+        top = base[here] + (definition["dimensions"]["zDimension"] if bare else well["z"] + well["depth"])
         tip_reach, tip_volume = reach[pipette]
-        if z + tip_reach >= top + REACH_CLEARANCE_MM - 1e-6:
+        nozzle = 0.0
+        if channels == 1:
+            opening = well.get("diameter") or min(well.get("xDimension", 0), well.get("yDimension", 0))
+            nozzle = NOZZLE_INTO_TUBE_MM if opening >= TUBE_OPENING_MM else NOZZLE_INTO_NARROW_MM
+        if z + tip_reach + nozzle >= top + REACH_CLEARANCE_MM - 1e-6:
             continue
         unknown = (lw, well_name) in probed and (params.get("wellLocation") or {}).get("origin") == "meniscus"
         key = (names.get(pipette, "pipette"), definition["metadata"]["displayName"], kind, bare, unknown)
-        entry = found.setdefault(key, {"wells": [], "depth": 0.0, "reach": tip_reach, "tip": tip_volume})
+        entry = found.setdefault(key, {"wells": [], "depth": 0.0, "reach": tip_reach, "tip": tip_volume, "nozzle": nozzle})
         if well_name not in entry["wells"]:
             entry["wells"].append(well_name)
         entry["depth"] = max(entry["depth"], top - z)
@@ -504,8 +618,9 @@ def reach_problems(analysis: dict[str, Any], commands: list[dict[str, Any]]) -> 
     for (pipette, name, kind, bare, unknown), e in found.items():
         wells = f"{', '.join(e['wells'][:4])}{'...' if len(e['wells']) > 4 else ''}"
         action = "aspirates" if kind.startswith("aspirate") else "dispenses" if kind.startswith("dispense") else "goes"
+        follows = f" (its nozzle follows them at most {e['nozzle']:g} mm into this opening)" if e["nozzle"] else ""
         text = (f"The {_load_name(pipette)} {action} {e['depth']:.0f} mm below the top of {wells} of {name}, but its "
-                f"{e['tip']:g} µL tips reach only {e['reach']:.0f} mm, so the pipette "
+                f"{e['tip']:g} µL tips reach only {e['reach']:.0f} mm{follows}, so the pipette "
                 f"{'and its nozzles without tips' if bare else 'itself'} would hit the {'labware' if bare else 'tube or well'}. ")
         if unknown:
             text += ("The level after measure_liquid_height isn't known before the run, so the check assumes the tube may "
@@ -562,6 +677,41 @@ def _well_at(definition: dict[str, Any], x: float, y: float) -> str | None:
     return None
 
 
+def tip_spot_problems(commands: list[dict[str, Any]]) -> list[str]:
+    """Tips picked up from a spot already emptied. The simulator allows it (e.g. pick_up_tip(rack["A1"]) every
+    time), but on the robot the spot is empty: the pipette goes on without a tip, into the liquid."""
+    names: dict[str, str] = {}
+    picked: dict[tuple[str, str], int] = {}  # (rack, spot) -> how many times picked while empty
+    holding: dict[str, tuple[str, str]] = {}  # pipette -> the spot its tip came from
+    for c in commands:
+        kind, params = c.get("commandType"), c.get("params") or {}
+        if kind == "loadLabware":
+            definition = (c.get("result") or {}).get("definition") or {}
+            if (definition.get("parameters") or {}).get("isTiprack"):
+                names[(c.get("result") or {}).get("labwareId", "")] = (definition.get("metadata") or {}).get("displayName", "tip rack")
+        elif kind == "pickUpTip" and params.get("labwareId") in names:
+            key = (params["labwareId"], params.get("wellName", ""))
+            picked[key] = picked.get(key, 0) + 1
+            holding[params.get("pipetteId", "")] = key
+        elif kind == "returnTip":
+            key = holding.pop(params.get("pipetteId", ""), None)
+            if key and picked.get(key):
+                picked[key] -= 1  # the tip is back in its spot
+        elif kind == "dropTip" and params.get("labwareId") in names:
+            key = (params["labwareId"], params.get("wellName", ""))
+            if picked.get(key):
+                picked[key] -= 1  # dropped back into the rack: the spot holds a tip again
+            holding.pop(params.get("pipetteId", ""), None)
+    repeated = [f"{spot} of {names[rack]} ({n} times)" for (rack, spot), n in picked.items() if n > 1]
+    if not repeated:
+        return []
+    return [
+        "The protocol picks up tips again from a spot it already emptied: " + _wells(repeated) + ". On the robot "
+        "that spot is empty, so the pipette would go on without a tip, into the liquid. Name the rack, not a spot: "
+        "pipette.pick_up_tip(rack) or pipette.pick_up_tip() takes the next unused tip."
+    ]
+
+
 def nozzle_problems(analysis: dict[str, Any], commands: list[dict[str, Any]]) -> list[str]:
     """A multi-channel head taken into labware its nozzles don't fit: an 8-channel in a tube rack puts
     one nozzle over the tube and the others onto the rack (the simulator only checks this for partial
@@ -570,6 +720,7 @@ def nozzle_problems(analysis: dict[str, Any], commands: list[dict[str, Any]]) ->
     pipettes = {p["id"]: p.get("pipetteName", "") for p in analysis.get("pipettes", [])}
     definitions: dict[str, dict[str, Any]] = {}
     layouts: dict[str, dict[str, Any]] = {}
+    tipped: dict[str, set[tuple[int, int]]] = {}  # pipette -> the nozzles that got a tip at the last pickup
     found: dict[tuple[str, str], list[str]] = {}
     for c in commands:
         kind, params = c.get("commandType"), c.get("params") or {}
@@ -577,6 +728,17 @@ def nozzle_problems(analysis: dict[str, Any], commands: list[dict[str, Any]]) ->
             definitions[c["result"]["labwareId"]] = c["result"]["definition"]
         elif kind == "configureNozzleLayout":
             layouts[params.get("pipetteId", "")] = params.get("configurationParams") or {}
+        elif kind == "pickUpTip" and params.get("labwareId") in definitions:
+            # Picking up at the edge of a rack (e.g. its last row) puts tips only on the nozzles over the rack.
+            rack = definitions[params["labwareId"]]
+            spot = rack["wells"].get(params.get("wellName", ""))
+            head = _channels(pipettes.get(params.get("pipetteId", ""), ""))
+            if spot and head > 1:
+                first, nozzles = _active_nozzles(head, layouts.get(params.get("pipetteId", "")))
+                tipped[params.get("pipetteId", "")] = {
+                    (r, n) for r, n in nozzles
+                    if _well_at(rack, spot["x"] + NOZZLE_PITCH_MM * (n - first[1]), spot["y"] - NOZZLE_PITCH_MM * (r - first[0]))
+                }
         if kind not in INTO_WELL or params.get("labwareId") not in definitions:
             continue
         definition = definitions[params["labwareId"]]
@@ -585,19 +747,31 @@ def nozzle_problems(analysis: dict[str, Any], commands: list[dict[str, Any]]) ->
         if channels == 1 or well is None or (definition.get("parameters") or {}).get("isTiprack"):
             continue
         primary, active = _active_nozzles(channels, layouts.get(params.get("pipetteId", "")))
+        if params.get("pipetteId", "") in tipped:
+            active = [nozzle for nozzle in active if nozzle in tipped[params["pipetteId"]]]
         if len(active) < 2:
             continue
         centred = "centerMultichannelOnWells" in ((definition.get("parameters") or {}).get("quirks") or [])
-        if centred:  # the Flex puts the middle of the active nozzles over the well
+        ref = primary
+        if centred:
+            # As the Flex does it: over a one-well reservoir (or a 96-grid) the middle of the active nozzles
+            # goes over the well; over troughs, only along the trough (each column stays over its own trough).
             rows, cols = [r for r, _ in active], [c for _, c in active]
-            ref = ((min(rows) + max(rows)) / 2, (min(cols) + max(cols)) / 2)
-        else:
-            ref = primary
-        offset = (params.get("wellLocation") or {}).get("offset") or {}
-        x0, y0 = well["x"] + offset.get("x", 0), well["y"] + offset.get("y", 0)
-        # Row A of the head is at the back (higher y), column 1 on the left.
-        under = [_well_at(definition, x0 + NOZZLE_PITCH_MM * (c - ref[1]), y0 - NOZZLE_PITCH_MM * (r - ref[0]))
-                 for r, c in active]
+            mid = ((min(rows) + max(rows)) / 2, (min(cols) + max(cols)) / 2)
+            count = len(definition["wells"])
+            if count == 1 or count >= 96:
+                ref = mid
+            elif well.get("yDimension", 0) > well.get("xDimension", 0):
+                ref = (mid[0], primary[1])
+            elif well.get("xDimension", 0) > well.get("yDimension", 0):
+                ref = (primary[0], mid[1])
+        # Where each nozzle is with the head over the middle of the well (a move to one side inside the well
+        # doesn't change which nozzle is over which well). Row A of the head is at the back, column 1 on the left.
+        size = definition.get("dimensions") or {}
+        spots = [(well["x"] + NOZZLE_PITCH_MM * (c - ref[1]), well["y"] - NOZZLE_PITCH_MM * (r - ref[0])) for r, c in active]
+        # Nozzles beyond the labware's edge aren't over it; only those over it must be over a well.
+        under = [_well_at(definition, x, y) for x, y in spots
+                 if 0 <= x <= size.get("xDimension", math.inf) and 0 <= y <= size.get("yDimension", math.inf)]
         if None in under or (not centred and len(set(under)) < len(under)):
             key = (pipettes.get(params["pipetteId"], "pipette"), definition["metadata"]["displayName"])
             wells = found.setdefault(key, [])
@@ -610,6 +784,298 @@ def nozzle_problems(analysis: dict[str, Any], commands: list[dict[str, Any]]) ->
         "if the robot has only a multi-channel, ask the scientist to move the liquid to a reservoir first."
         for (pipette, name), wells in found.items()
     ]
+
+
+# The lab's pipetting rules for dispensing into plate wells (volumes in µL, heights above the well bottom in mm).
+SMALL_DISPENSE_UL = (1, 10)   # dispensed close to the bottom with a push-out
+SMALL_DISPENSE_Z_MM = 1.0
+PUSH_OUT_UL = 2.0
+# Push-outs accepted for 1-10 uL: 2 uL clears a 1000 uL tip, but on 2026-11-17 a 2 uL drop stayed on 50 uL tips
+# with 2 uL of push-out and came off with 5-7 uL (or into liquid already in the well).
+PUSH_OUT_RANGE_UL = (2.0, 7.0)
+PUSH_OUT_50_UL = 5.0
+LARGE_DISPENSE_UL = 50        # more than this is dispensed from above
+LARGE_DISPENSE_Z_MM = 12.0
+PRE_WET = re.compile(r"\bpre_wet\b[\w.]*\s*=\s*True")
+
+
+def _height_above_bottom(well: dict[str, Any], location: dict[str, Any]) -> float | None:
+    """How high above the well bottom a command puts the tip end; None for meniscus-relative places."""
+    base = {"bottom": 0.0, "center": well.get("depth", 0) / 2, "top": well.get("depth", 0)}.get(location.get("origin", "top"))
+    if base is None:
+        return None
+    return base + ((location.get("offset") or {}).get("z") or 0)
+
+
+def _wells(names: list[str]) -> str:
+    return ", ".join(names[:4]) + ("..." if len(names) > 4 else "")
+
+
+SUBMERGED_MM = 1.0  # liquid this far above the tip end covers it
+
+
+def _liquid_height(well: dict[str, Any], volume: float) -> float:
+    """Roughly how high `volume` µL stands in a well (as if it had straight walls)."""
+    if well.get("shape") == "circular" and well.get("diameter"):
+        area = math.pi * (well["diameter"] / 2) ** 2
+    elif well.get("xDimension") and well.get("yDimension"):
+        area = well["xDimension"] * well["yDimension"]
+    else:
+        return 0.0
+    return volume / area
+
+
+BIG_TIP_MIN_UL = 50  # less than this is not pipetted with 1000 µL tips
+BIG_TIP_UL = 200  # tips bigger than this are the 1000 µL ones
+VOLUME_COMMANDS = ("aspirate", "aspirateInPlace", "aspirateWhileTracking",
+                   "dispense", "dispenseInPlace", "dispenseWhileTracking")
+
+
+# Less than this with 50 uL tips needs the small-volume settings tested on the lab's Flex (2026-11-17): 2 uL stayed
+# on the tip at 478 and 10 uL/s with 2 uL of push-out; it came off at 20 uL/s with a 1 s pause and 5-7 uL of
+# push-out. 10 uL worked with the defaults.
+SLOW_BELOW_UL = 10
+SLOW_FLOW_UL_S = 20
+SMALL_TIP_UL = 50
+
+
+def small_volume_problems(analysis: dict[str, Any], commands: list[dict[str, Any]]) -> list[str]:
+    """Less than 10 uL with 50 uL tips on a 1000 uL pipette (what was tested): slow aspirate and dispense, a pause
+    after aspirating, a 5-7 uL push-out (or none into liquid that covers the tip, which pipetting_problems checks).
+    Mixing is left out; the 50 uL pipettes, with their own low-volume mode, weren't tested and aren't checked."""
+    p1000 = {p["id"] for p in analysis.get("pipettes", []) if "p1000" in p.get("pipetteName", "")}
+    tip: dict[str, float] = {}
+    last_aspirate: dict[str, tuple[str, str]] = {}
+    last_dispense: dict[str, tuple[str, str]] = {}
+    fast, no_pause, push_low = [], [], []
+    for i, c in enumerate(commands):
+        kind, params = c.get("commandType"), c.get("params") or {}
+        pipette = params.get("pipetteId", "")
+        if kind == "pickUpTip":
+            tip[pipette] = float(((c.get("result") or {}).get("tipVolume")) or 0)
+            last_aspirate.pop(pipette, None)
+            last_dispense.pop(pipette, None)
+            continue
+        if kind in ("dropTip", "dropTipInPlace"):
+            tip.pop(pipette, None)
+            continue
+        if kind not in ("aspirate", "dispense"):
+            continue
+        volume = params.get("volume") or 0
+        key = (params.get("labwareId", ""), params.get("wellName", ""))
+        small = pipette in p1000 and 0 < volume < SLOW_BELOW_UL and 0 < tip.get(pipette, 0) <= SMALL_TIP_UL
+        if kind == "aspirate":
+            mixing = last_dispense.get(pipette) == key
+            last_aspirate[pipette] = key
+            if not small or mixing:
+                continue
+            where = f"{volume:g} µL from {key[1]}"
+            if (params.get("flowRate") or 0) > SLOW_FLOW_UL_S + 0.5:
+                fast.append(f"{where} at {params.get('flowRate'):g} µL/s")
+            following = commands[i + 1].get("commandType") if i + 1 < len(commands) else ""
+            if following != "waitForDuration":
+                no_pause.append(where)
+        else:
+            mixing = last_aspirate.get(pipette) == key
+            last_dispense[pipette] = key
+            if not small or mixing:
+                continue
+            where = f"{volume:g} µL into {key[1]}"
+            if (params.get("flowRate") or 0) > SLOW_FLOW_UL_S + 0.5:
+                fast.append(f"{where} at {params.get('flowRate'):g} µL/s")
+            push = params.get("pushOut") or 0
+            if 0.01 < push < PUSH_OUT_50_UL - 0.01:
+                push_low.append(f"{where} (push-out {push:g} µL)")
+    if not (fast or no_pause or push_low):
+        return []
+    found = []
+    if fast:
+        found.append(f"too fast: {_wells(fast)}")
+    if no_pause:
+        found.append(f"no pause after aspirating: {_wells(no_pause)}")
+    if push_low:
+        found.append(f"push-out under {PUSH_OUT_50_UL:g} µL: {_wells(push_low)}")
+    return [
+        f"Less than {SLOW_BELOW_UL:g} µL with 50 µL tips on a 1000 µL pipette needs the lab's tested small-volume "
+        "settings (on this Flex a "
+        "2 µL drop stayed on the tip without them): set pipette.flow_rate.aspirate and pipette.flow_rate.dispense to "
+        f"{SLOW_FLOW_UL_S:g} µL/s before the transfer (after any configure_for_volume(), which resets them), call "
+        "protocol.delay(seconds=1) right after each aspirate with the tip still in the liquid, and dispense with "
+        f"push_out={PUSH_OUT_50_UL:g} (push_out=0 only into liquid that covers the tip). Not so here: "
+        + "; ".join(found) + "."
+    ]
+
+
+def volume_problems(analysis: dict[str, Any], commands: list[dict[str, Any]], rules: DeckRules) -> list[str]:
+    """Aspirates and dispenses below the pipette's minimum volume, where the liquid stays on the tip.
+    Air gaps (aspirated at or above a well's rim) and liquid returned to the well it was just taken
+    from (a mix, or a little dispensed back before leaving the source) are not transfers and don't count."""
+    names = {p["id"]: p.get("pipetteName", "") for p in analysis.get("pipettes", [])}
+    definitions = {c["result"]["labwareId"]: c["result"]["definition"] for c in commands
+                   if c.get("commandType") == "loadLabware" and ((c.get("result") or {}).get("definition") or {}).get("wells")}
+    tip_volume: dict[str, float] = {}  # pipette -> volume of the tip it holds
+    last_aspirate: dict[str, tuple[str, str]] = {}
+    big_tip: dict[str, list[str]] = {}  # pipette name -> small volumes it moves with a 1000 µL tip
+    low_volume: dict[str, bool] = {}
+    # (pipette name, its minimum) -> volume below that -> the wells it goes in or out of
+    small: dict[tuple[str, float], dict[float, list[str]]] = {}
+    for c in commands:
+        kind, params = c.get("commandType"), c.get("params") or {}
+        pipette = params.get("pipetteId", "")
+        name = names.get(pipette, "")
+        if kind == "configureForVolume":
+            low_volume[pipette] = name in LOW_VOLUME_RANGE_UL and (params.get("volume") or 0) < LOW_VOLUME_BELOW_UL
+        elif kind == "pickUpTip":
+            tip_volume[pipette] = float((c.get("result") or {}).get("tipVolume") or 0)
+            last_aspirate.pop(pipette, None)
+        returned = False
+        if kind in VOLUME_COMMANDS and params.get("wellName"):
+            here = (params.get("labwareId", ""), params["wellName"])
+            well = (definitions.get(here[0]) or {}).get("wells", {}).get(here[1])
+            if kind.startswith("aspirate"):
+                height = _height_above_bottom(well, params.get("wellLocation") or {}) if well else None
+                if height is not None and height >= well.get("depth", 0):
+                    continue  # an air gap
+                last_aspirate[pipette] = here
+            elif last_aspirate.get(pipette) == here:
+                returned = True
+            elif 0 < (params.get("volume") or 0) < BIG_TIP_MIN_UL and tip_volume.get(pipette, 0) > BIG_TIP_UL:
+                big_tip.setdefault(name, []).append(f"{params['volume']:g} µL into {params['wellName']}")
+        if kind in VOLUME_COMMANDS and name in PIPETTE_RANGE_UL and not returned:
+            low, _ = (LOW_VOLUME_RANGE_UL if low_volume.get(pipette) else PIPETTE_RANGE_UL)[name]
+            volume = params.get("volume") or 0
+            if 0 < volume < low - 1e-6:
+                wells = small.setdefault((name, low), {}).setdefault(volume, [])
+                if params.get("wellName") and params["wellName"] not in wells:
+                    wells.append(params["wellName"])
+    installed = [p for _, p in rules.pipettes] or list(PIPETTE_INTERNAL)
+    fifty = [p for p in installed if p.endswith("_50")]
+    problems = []
+    for (name, low), found in small.items():
+        load = _load_name(name)
+        high = (LOW_VOLUME_RANGE_UL if low < PIPETTE_RANGE_UL[name][0] else PIPETTE_RANGE_UL)[name][1]
+        if name in LOW_VOLUME_RANGE_UL and low >= LOW_VOLUME_BELOW_UL:
+            fix = f"call {load}'s configure_for_volume(volume) with the volume before pick_up_tip() (1-30 µL then)"
+        elif fifty and load not in fifty:
+            single = " with a single-nozzle layout (configure_nozzle_layout) to reach tubes" if "8channel" in fifty[0] else ""
+            fix = f"use the {fifty[0]} in low-volume mode (configure_for_volume(volume) before pick_up_tip(), 1-30 µL){single}"
+        else:
+            fix = ""
+        fix = (fix + ", or " if fix else "") + f"dilute the stock first so each transfer is at least {low:g} µL"
+        volumes = "; ".join(f"{v:g} µL" + (f" ({_wells(w)})" if w else "") for v, w in sorted(found.items()))
+        problems.append(
+            f"The {load} pipettes {low:g}-{high:g} µL (any volume in that range), so it can't pipette "
+            f"{volumes}: below {low:g} µL the liquid stays on the tip. To pipette less, {fix}."
+        )
+    for name, found in big_tip.items():
+        problems.append(
+            f"The {_load_name(name)} moves less than {BIG_TIP_MIN_UL:g} µL with a 1000 µL tip "
+            f"({_wells(list(dict.fromkeys(found)))}). Small volumes are accurate only in small tips: pick up 50 µL tips "
+            f"for {BIG_TIP_MIN_UL:g} µL and less (load a 50 µL rack and pick_up_tip(that_rack)), and keep the 1000 µL tips "
+            "for the larger volumes."
+        )
+    return problems
+
+
+def pipetting_problems(code: str, commands: list[dict[str, Any]]) -> list[str]:
+    """The lab's pipetting rules: no pre-wetting, 1-10 µL dispensed 1 mm above the bottom with a 2 µL push-out,
+    more than 50 µL from 12 mm above the bottom, and no tip taken from liquid in one well into another."""
+    problems = []
+    if PRE_WET.search(code):
+        problems.append("The protocol pre-wets tips (pre_wet=True). This lab doesn't pre-wet: leave pre_wet out.")
+    definitions: dict[str, dict[str, Any]] = {}
+    filled: set[tuple[str, str]] = set()
+    volumes: dict[tuple[str, str], float] = {}  # µL in each well, as far as the protocol says
+    last_aspirate: dict[str, tuple[str, str]] = {}
+    last_dispense: dict[str, tuple[str, str]] = {}
+    touched: dict[str, tuple[str, str]] = {}  # pipette -> the well whose liquid its tip last went into
+    holding: dict[str, tuple[str, str]] = {}  # pipette -> the well the liquid in its tip came from
+    small_low, small_push, large_low, carried = [], [], [], []
+
+    def label(key: tuple[str, str]) -> str:
+        return f"{key[1]} of {definitions[key[0]]['metadata']['displayName']}"
+
+    for c in commands:
+        kind, params = c.get("commandType"), c.get("params") or {}
+        pipette = params.get("pipetteId", "")
+        if kind == "loadLabware" and ((c.get("result") or {}).get("definition") or {}).get("wells"):
+            definitions[c["result"]["labwareId"]] = c["result"]["definition"]
+        elif kind == "loadLiquid":
+            for w, v in (params.get("volumeByWell") or {}).items():
+                if v:
+                    filled.add((params.get("labwareId", ""), w))
+                    volumes[(params.get("labwareId", ""), w)] = float(v)
+        elif kind in ("pickUpTip", "dropTip", "dropTipInPlace"):
+            touched.pop(pipette, None)
+            holding.pop(pipette, None)
+            last_aspirate.pop(pipette, None)
+            last_dispense.pop(pipette, None)
+        if kind not in ("aspirate", "dispense") or params.get("labwareId") not in definitions:
+            continue
+        definition = definitions[params["labwareId"]]
+        well = definition["wells"].get(params.get("wellName", ""))
+        if well is None or (definition.get("parameters") or {}).get("isTiprack"):
+            continue
+        key = (params["labwareId"], params["wellName"])
+        if kind == "aspirate":
+            # Going back into the well it just dispensed into (to mix) carries nothing new there.
+            if pipette in touched and key not in (touched[pipette], last_dispense.get(pipette)):
+                carried.append(f"{label(touched[pipette])} into {label(key)}")
+            touched[pipette] = holding[pipette] = last_aspirate[pipette] = key
+            if key in volumes:
+                volumes[key] = max(0.0, volumes[key] - (params.get("volume") or 0))
+            continue
+        volume = params.get("volume") or 0
+        height = _height_above_bottom(well, params.get("wellLocation") or {})
+        mixing = last_aspirate.get(pipette) == key  # mix(), or liquid returned to where it came from
+        plate = (definition.get("metadata") or {}).get("displayCategory") == "wellPlate"
+        if plate and not mixing and height is not None:
+            if SMALL_DISPENSE_UL[0] <= volume <= SMALL_DISPENSE_UL[1]:
+                if abs(height - SMALL_DISPENSE_Z_MM) > 0.25:
+                    small_low.append(f"{params['wellName']} ({volume:g} µL at {height:.1f} mm)")
+                push = params.get("pushOut") or 0
+                # Under the surface of liquid already in the well, push-out would blow air into it: none is fine.
+                submerged = _liquid_height(well, volumes.get(key, 0)) >= height + SUBMERGED_MM
+                in_range = PUSH_OUT_RANGE_UL[0] - 0.01 <= push <= PUSH_OUT_RANGE_UL[1] + 0.01
+                if not in_range and not (submerged and push <= 0.01):
+                    small_push.append(f"{params['wellName']} ({volume:g} µL, push-out {params.get('pushOut') or 0:g} µL)")
+            elif volume > LARGE_DISPENSE_UL and abs(height - LARGE_DISPENSE_Z_MM) > 0.5:
+                large_low.append(f"{params['wellName']} ({volume:g} µL at {height:.1f} mm)")
+        # Dispensing below the rim into liquid puts the tip into it (into an empty well, or from above, it doesn't).
+        if key in filled and height is not None and height < well.get("depth", 0):
+            if pipette in touched and touched[pipette] not in (holding.get(pipette), key) and last_dispense.get(pipette) != key:
+                carried.append(f"{label(touched[pipette])} into {label(key)}")
+            touched[pipette] = key
+        last_dispense[pipette] = key
+        if volume:
+            filled.add(key)
+            volumes[key] = volumes.get(key, 0) + volume
+    if small_low or small_push:
+        problems.append(
+            f"Dispense {SMALL_DISPENSE_UL[0]}-{SMALL_DISPENSE_UL[1]} µL into plate wells {SMALL_DISPENSE_Z_MM:g} mm above "
+            f"the bottom with a push-out of {PUSH_OUT_RANGE_UL[0]:g}-{PUSH_OUT_RANGE_UL[1]:g} µL ({PUSH_OUT_UL:g} µL with "
+            f"1000 µL tips, {PUSH_OUT_50_UL:g} µL with 50 µL tips): pipette.aspirate(10, source); "
+            f"pipette.dispense(10, well.bottom(z={SMALL_DISPENSE_Z_MM:g}), push_out={PUSH_OUT_UL:g}). Push-out is air the "
+            "plunger pushes after the liquid, so aspirate exactly the volume you dispense: never aspirate extra for it "
+            "or dispense it as a second dispense. (Into a well whose liquid already covers the tip, e.g. into 200 µL of "
+            "reagent, push_out=0 is right: push-out there would blow air into the liquid.) Not so here: "
+            + _wells(small_low + small_push) + "."
+        )
+    if large_low:
+        problems.append(
+            f"Dispense more than {LARGE_DISPENSE_UL} µL into plate wells from above, {LARGE_DISPENSE_Z_MM:g} mm above the "
+            f"bottom: pipette.dispense(200, well.bottom(z={LARGE_DISPENSE_Z_MM:g})). Not so here: {_wells(large_low)}."
+        )
+    if carried:
+        problems.append(
+            "A tip that touched liquid in one well goes on into another, carrying that liquid with it: "
+            f"{_wells(list(dict.fromkeys(carried)))}. One tip may fill several wells from one source (e.g. triplicates) "
+            "only while they are empty, or from above their rim. Once it goes into liquid there (dispensing into a well "
+            "that already holds liquid, or mixing there), take a fresh tip before going into any other well or back to "
+            "the source, and use a fresh tip for each different source. In a serial dilution the tip may carry on from "
+            "the well it just mixed in."
+        )
+    return problems
 
 
 def _out_of_tips(tip_racks: list[dict[str, Any]], deck_tips: DeckTips | None) -> str:
@@ -848,6 +1314,34 @@ def _pipette_name(name: str) -> str:
     return f"Flex {channels} {match[1]} µL"
 
 
+def _steps(commands: list[dict[str, Any]], names: dict[str, str]) -> list[str]:
+    """The run as readable steps. The analysis has no mix command: mix() is aspirates and dispenses of the
+    same volume in the same well, so those pairs are shown as one mix."""
+    def mix_pair(i: int) -> tuple[str, str, str, float] | None:
+        if i + 1 >= len(commands):
+            return None
+        a, d = commands[i], commands[i + 1]
+        if a.get("commandType") != "aspirate" or d.get("commandType") != "dispense":
+            return None
+        pa, pd = a.get("params") or {}, d.get("params") or {}
+        same = all(pa.get(k) == pd.get(k) for k in ("pipetteId", "labwareId", "wellName", "volume"))
+        return (pa["pipetteId"], pa["labwareId"], pa["wellName"], pa["volume"]) if same and pa.get("volume") else None
+
+    steps, i = [], 0
+    while i < len(commands):
+        pair = mix_pair(i)
+        if pair:
+            count = 0
+            while mix_pair(i) == pair:
+                count, i = count + 1, i + 2
+            steps.append(f"Mix {count}× {pair[3]:g} µL in {pair[2]} of {names.get(pair[1], 'labware')}")
+            continue
+        if text := _describe(commands[i], names):
+            steps.append(text)
+        i += 1
+    return steps
+
+
 def _describe(cmd: dict[str, Any], names: dict[str, str]) -> str | None:
     kind, p = cmd.get("commandType", ""), cmd.get("params", {})
     lw = names.get(p.get("labwareId", ""), "labware")
@@ -861,7 +1355,8 @@ def _describe(cmd: dict[str, Any], names: dict[str, str]) -> str | None:
         case "aspirate":
             return f"Aspirate {volume:g} µL from {where}"
         case "dispense":
-            return f"Dispense {volume:g} µL into {where}"
+            push = f" (push-out {p['pushOut']:g} µL)" if p.get("pushOut") else ""
+            return f"Dispense {volume:g} µL into {where}{push}"
         case "blowout":
             return f"Blow out in {where}"
         case "blowOutInPlace":

@@ -278,9 +278,13 @@ class Sequencer:
         if op.type == "liquid_handling":
             source = decode_protocol_source(op.protocol_b64)
             if self._tips and op.tips:
-                # Start each pipette at its rack's first unused tip (see tips.py).
-                before, after = self._tips.plan(op.tips)
+                # Start each pipette at its rack's first unused tip (see tips.py). With fresh racks every
+                # run, that is where the run's earlier protocols left them, from full racks.
+                run_used = run.context.setdefault("tips_used", {}) if self._tips.fresh_each_run else None
+                before, after = self._tips.plan(op.tips, run_used)
                 source = with_tip_state(source, before)
+                if run_used is not None:
+                    run_used.update({slot: count for slot, (_, count) in after.items()})
             params: dict[str, Any] = {
                 "protocol_filename": op.protocol_filename, "source": source, "runtime_parameters": op.runtime_parameters,
             }

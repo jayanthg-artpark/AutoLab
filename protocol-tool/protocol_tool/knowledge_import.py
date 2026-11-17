@@ -438,17 +438,18 @@ LiquidHeightUnknownError, so a missing volume is caught before the run.
 
 ## How deep a tip reaches
 
-A tip reaches only its own length below the pipette: 1000 µL tips 86 mm, 200 µL tips 48.6 mm, 50 µL tips 47.8 mm.
-Deeper than that below the top of a tube or well, the pipette itself (and, with a partial tip layout, the nozzles
-without tips) hits the tube or the rack. A 50 or 15 mL Falcon tube is about 113 mm deep, so:
+A tip reaches its own length below the pipette: 1000 µL tips 86 mm, 200 µL tips 48.6 mm, 50 µL tips 47.8 mm.
+A single-channel pipette's nozzle is narrow and follows the tip into a tube: up to 33 mm into a 15 or 50 mL tube
+(Opentrons' own library protocols take 1000 µL tips to 1 mm above the bottom of 15 mL tubes), and 3.5 mm into
+narrower tubes and wells. Deeper than that, the pipette itself hits the tube. A multi-channel head doesn't go in
+at all, and with a partial tip layout its nozzles without tips hit the rack. A 15 or 50 mL tube is 113-118 mm
+deep, so:
 
-- Take liquid from these tubes with 1000 µL tips. Even they don't reach the bottom 27 mm or so of a 50 mL tube,
-  so the tube needs liquid left over at the end of the run. Tell the scientist how much to put in.
-- 50 and 200 µL tips reach only the top 48 mm: the tube must stay nearly full.
-- Dispense into a tube near the top, tube.top(-5), never at the default 1 mm above the bottom.
+- Take liquid from these tubes with a single-channel pipette and 1000 µL tips: they reach the bottom.
+- 50 and 200 µL tips reach about 80 mm down: the tube must stay about a third full.
 
 The simulation check follows the level as the protocol takes liquid and fails any aspirate or dispense that goes
-deeper than the tip reaches. It needs the volume in each tube for that, from load_liquid.
+deeper than the pipette reaches. It needs the volume in each tube for that, from load_liquid.
 
 ## Volume not known
 
@@ -479,8 +480,9 @@ the level is taken to be at the bottom.
 - Use z=-2 to z=-5: deep enough to stay in liquid while aspirating, shallow enough to keep the outside of the tip dry.
 - pipette.liquid_presence_detection = True only checks that there is liquid before each aspirate; it does not move the
   aspirate height. Use measure_liquid_height() for that.
-- Dispense into an empty plate as usual (1 mm above the bottom, or well.top(-1) for drops from above). Into
-  tubes, dispense near the top: tube.top(-5).
+- Dispense into plate wells by the lab's rules: 1-10 µL at well.bottom(z=1) with push_out=2, more than 50 µL
+  from above at well.bottom(z=12). Into tubes,
+  dispense near the top: tube.top(-5).
 """
 
 

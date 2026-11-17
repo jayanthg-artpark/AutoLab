@@ -24,6 +24,7 @@ from typing import Any
 
 import httpx
 
+from .fit_context import ContextTooLong, fit
 from .model_status import ModelAuthError, ModelError, ModelNotFound, load_key_file
 from .models import ModelTurn
 from .providers import Provider
@@ -42,6 +43,10 @@ REST_NOT_FOUND_S = 3600.0
 # A busy Gemini model sometimes hangs instead of answering 503. When another model can take
 # over, one that sends nothing this long counts as busy (thinking first takes well under this).
 FIRST_ANSWER_S = 45.0
+# Characters per token assumed until a server's error says how many tokens a request had.
+CHARS_PER_TOKEN = 3.0
+# Context-window refusals answered by shortening the conversation and trying again.
+REFITS = 2
 _pdf_cache: dict[str, str] = {}
 
 
@@ -75,6 +80,8 @@ class OpenAICompatModel:
         self._models = list(dict.fromkeys([provider.model, *provider.fallback_models]))
         self._max_wait_s = max_wait_s
         self._resting: dict[str, tuple[float, bool]] = {}  # model -> (not tried until, daily limit)
+        # model -> (context window in tokens, characters per token), learned from the server's refusals
+        self._windows: dict[str, tuple[int, float]] = {}
 
     @property
     def active_model(self) -> str:
@@ -89,15 +96,9 @@ class OpenAICompatModel:
         last_error: ModelError | None = None
         for position, model in enumerate(ready):
             is_last = position == len(ready) - 1
-            body = {
-                "model": model,
-                "messages": to_openai_messages(system, messages, model),
-                "stream": True,
-            }
-            if tools:  # some servers reject an empty tool list
-                body["tools"] = [to_openai_tool(t) for t in tools]
-            waited = 0.0
-            for attempt in range(RATE_LIMIT_WAITS + 1):
+            body = self._body(model, system, tools, messages)
+            waited, waits, refits = 0.0, 0, 0
+            while True:
                 chunks = self._post(body, retry_overloaded=is_last)
                 try:
                     # Sends the request; raises on HTTP errors.
@@ -105,14 +106,24 @@ class OpenAICompatModel:
                 except TimeoutError:
                     await chunks.aclose()
                     last_error = Overloaded(f"{p.label} {model} sent nothing for {FIRST_ANSWER_S:.0f} s")
+                except ContextTooLong as exc:
+                    if refits == REFITS:
+                        raise
+                    refits += 1
+                    self._learn_window(model, exc, body)
+                    log.info("%s %s has a %d-token context window; sending a shortened conversation", p.label, model, exc.limit)
+                    yield {"type": "status", "label": "The conversation is longer than the AI model can read; sending a shortened copy…"}
+                    body = self._body(model, system, tools, messages)
+                    continue
                 except RateLimited as exc:
-                    wait = exc.retry_after if exc.retry_after is not None else min(5.0 * 2**attempt, 30.0)
-                    can_wait = self._max_wait_s > 0 and attempt < RATE_LIMIT_WAITS and waited + wait <= self._max_wait_s
+                    wait = exc.retry_after if exc.retry_after is not None else min(5.0 * 2**waits, 30.0)
+                    can_wait = self._max_wait_s > 0 and waits < RATE_LIMIT_WAITS and waited + wait <= self._max_wait_s
                     if is_last and not exc.per_day and can_wait:
                         yield {"type": "status", "label": f"{p.label} is at its free per-minute limit; waiting {wait:.0f} s…"}
                         log.info("%s %s is rate-limited; waiting %.0f s", p.label, model, wait)
                         await asyncio.sleep(wait)
                         waited += wait
+                        waits += 1
                         continue
                     last_error = exc
                 except (Overloaded, ModelNotFound) as exc:
@@ -128,6 +139,40 @@ class OpenAICompatModel:
                     log.warning("%s model %s unavailable (%s); trying %s", p.label, model, last_error, ready[position + 1])
                 break
         raise last_error or ModelError(f"No {p.label} model answered")
+
+    def _body(self, model: str, system, tools, messages) -> dict[str, Any]:
+        """The request, with the conversation shortened if it is longer than the model's known window."""
+        body: dict[str, Any] = {"model": model, "messages": None, "stream": True}
+        if tools:  # some servers reject an empty tool list
+            body["tools"] = [to_openai_tool(t) for t in tools]
+        window = self._windows.get(model)
+        if window is None:
+            body["messages"] = to_openai_messages(system, messages, model)
+            return body
+        limit, chars_per_token = window
+        # Room for the reply (and the model's reasoning): an eighth of the window.
+        budget = (limit - max(2048, limit // 8)) * chars_per_token
+        tools_size = len(json.dumps(body.get("tools", [])))
+        last: list[dict[str, Any]] = []  # the conversion fit() accepted: its last check
+
+        def fits(msgs):
+            last[:] = to_openai_messages(system, msgs, model)
+            return tools_size + len(json.dumps(last)) <= budget
+
+        if fit(messages, fits) is None:
+            raise ContextTooLong(
+                f"This conversation is too long for {model}, which reads at most {limit:,} tokens, even with the older "
+                "parts left out. Start a new design (Designs > New design), or attach a shorter file.", limit)
+        body["messages"] = last
+        return body
+
+    def _learn_window(self, model: str, exc: ContextTooLong, body: dict[str, Any]) -> None:
+        size = len(json.dumps(body["messages"])) + len(json.dumps(body.get("tools", [])))
+        chars_per_token = size / exc.used if exc.used else CHARS_PER_TOKEN
+        known = self._windows.get(model)
+        if known and not exc.used:
+            chars_per_token = known[1] * 0.8  # the last estimate was too generous
+        self._windows[model] = (exc.limit, chars_per_token)
 
     def _is_resting(self, model: str) -> bool:
         until, _ = self._resting.get(model, (0.0, False))
@@ -317,6 +362,8 @@ def _http_error(p: Provider, model: str, response: httpx.Response) -> ModelError
         return ModelAuthError("invalid", message)
     if response.status_code == 403:
         return ModelAuthError("no_access", message)
+    if response.status_code in (400, 413) and (window := _context_window(message)):
+        return ContextTooLong(f"The conversation is longer than {model} can read ({message})", *window)
     if response.status_code == 429:
         retry_after, per_day = _quota(response)
         if per_day:
@@ -330,6 +377,17 @@ def _http_error(p: Provider, model: str, response: httpx.Response) -> ModelError
     if response.status_code == 404:
         return ModelNotFound(f"{p.label} cannot use the model {model}: {message}")
     return ModelError(f"{p.label} error {response.status_code}: {message}")
+
+
+def _context_window(message: str) -> tuple[int, int | None] | None:
+    """(the model's context window, the refused request's tokens) from a server's "too long" error, e.g.
+    llama.cpp: "request (68256 tokens) exceeds the available context size (65536 tokens)";
+    vLLM/OpenAI: "maximum context length is 32768 tokens. However, you requested 33000 tokens"."""
+    limit = re.search(r"context (?:size|length|window)\D{0,20}?(\d+)", message, re.IGNORECASE)
+    if not limit:
+        return None
+    used = re.search(r"(?:request \(|requested |resulted in |prompt has )(\d+) tokens", message, re.IGNORECASE)
+    return int(limit.group(1)), int(used.group(1)) if used else None
 
 
 # --- Format conversion -------------------------------------------------------------------

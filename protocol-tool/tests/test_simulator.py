@@ -260,7 +260,7 @@ LAYOUT
     pipette.pick_up_tip()
     source["WELL"].load_liquid(protocol.define_liquid("Buffer"), 1000)
     pipette.aspirate(10, source["WELL"].meniscus(z=-2, target="end"))
-    pipette.dispense(10, plate["DEST"])
+    pipette.dispense(10, plate["DEST"], push_out=2)
     pipette.drop_tip()
 ''' % LATEST
 
@@ -308,8 +308,8 @@ def run(protocol):
 LAYOUT
     rack["A1"].load_liquid(protocol.define_liquid("Buffer"), VOLUME)
     pipette.pick_up_tip()
-    pipette.aspirate(30, rack["A1"].meniscus(z=-2, target="end"))
-    pipette.dispense(30, DEST)
+    pipette.aspirate(50, rack["A1"].meniscus(z=-2, target="end"))
+    pipette.dispense(50, DEST)
     pipette.drop_tip()
 ''' % LATEST
 
@@ -322,16 +322,21 @@ def reach(tips: int, volume: int, dest: str = 'plate["H1"]', pipette: str = "fle
 
 def test_tips_reach_only_their_length_into_a_tube():
     assert reach(50, 40000).ok  # a full 50 mL tube: the surface is near the top
-    low = reach(50, 5000)  # 5 mL: the surface is about 98 mm down, a 50 uL tip reaches 48 mm
-    assert any(e.startswith("The flex_1channel_1000 aspirates ") and "50 µL tips reach only 48 mm, so the pipette itself "
-               "would hit the tube or well" in e for e in low.errors), low.errors
-    assert reach(1000, 20000).ok, reach(1000, 20000).errors  # 1000 uL tips reach 86 mm
-    assert not reach(1000, 3000).ok  # but not the bottom of a 50 mL tube
+    # 5 mL: the surface is about 98 mm down. A 50 uL tip reaches 48 mm and the nozzle follows it 33 mm into the tube.
+    low = reach(50, 5000)
+    assert any(e.startswith("The flex_1channel_1000 aspirates ") and "50 µL tips reach only 48 mm (its nozzle follows "
+               "them at most 33 mm into this opening), so the pipette itself would hit the tube or well" in e
+               for e in low.errors), low.errors
+    # 1000 uL tips reach 86 mm and, with the nozzle following, the bottom of a 50 mL tube: Opentrons' own library
+    # protocols take them to 1 mm above the bottom of 15 mL tubes.
+    assert reach(1000, 20000).ok, reach(1000, 20000).errors
+    assert reach(1000, 3000).ok, reach(1000, 3000).errors
+    assert reach(1000, 40000, dest='rack["B1"]').ok  # dispensing at the default 1 mm above the bottom
 
-    # Dispensing into a tube at the default height (1 mm above the bottom) puts the pipette into it.
-    into_tube = reach(1000, 40000, dest='rack["B1"]')
+    # A 50 uL tip dispensing at the default height (1 mm above the bottom) puts the pipette itself into the tube.
+    into_tube = reach(50, 40000, dest='rack["B1"]')
     assert any("dispenses" in e and "tube.top(-5)" in e for e in into_tube.errors), into_tube.errors
-    assert reach(1000, 40000, dest='rack["B1"].top(-5)').ok
+    assert reach(50, 40000, dest='rack["B1"].top(-5)').ok
 
     # An 8-channel using one nozzle: the nozzles without tips hang over the tube rack at the pipette's height.
     single = '    pipette.configure_nozzle_layout(style=SINGLE, start="H1", tip_racks=[tips])'
@@ -339,3 +344,201 @@ def test_tips_reach_only_their_length_into_a_tube():
     deep = reach(50, 5000, pipette="flex_8channel_50", layout=single)
     assert any("the pipette and its nozzles without tips would hit the labware" in e for e in deep.errors), deep.errors
     assert "a tip reaches only its own length below the pipette (50 µL tips 47.8 mm" in DeckRules().describe()
+
+
+PIPETTING = '''requirements = {"robotType": "Flex", "apiLevel": "%s"}
+def run(protocol):
+    protocol.load_waste_chute()
+    tips = protocol.load_labware("opentrons_flex_96_tiprack_200ul", "C3")
+    res = protocol.load_labware("nest_12_reservoir_15ml", "C2")
+    plate = protocol.load_labware("nest_96_wellplate_200ul_flat", "D1")
+    p = protocol.load_instrument("flex_1channel_1000", "left", tip_racks=[tips])
+    res["A1"].load_liquid(protocol.define_liquid("Diluent"), 10000)
+    res["A2"].load_liquid(protocol.define_liquid("Standard"), 10000)
+    res["A3"].load_liquid(protocol.define_liquid("Reagent"), 10000)
+BODY
+''' % LATEST
+
+# Triplicates of 10 uL diluent with one tip into empty wells, then 10 uL standard into each with a fresh tip
+# and a mix, then 100 uL reagent from above (above the rim: one tip is fine).
+GOOD_BODY = """
+    p.pick_up_tip()
+    for w in ("A1", "A2", "A3"):
+        p.aspirate(10, res["A1"])
+        p.dispense(10, plate[w].bottom(z=1), push_out=2)
+    p.drop_tip()
+    for w in ("A1", "A2", "A3"):
+        p.pick_up_tip()
+        p.aspirate(10, res["A2"])
+        p.dispense(10, plate[w].bottom(z=1), push_out=2)
+        p.mix(3, 15, plate[w].bottom(z=1))
+        p.drop_tip()
+    p.pick_up_tip()
+    for w in ("A1", "A2", "A3"):
+        p.aspirate(100, res["A3"])
+        p.dispense(100, plate[w].bottom(z=12))
+    p.drop_tip()
+"""
+
+
+def pipetting(body: str):
+    return asyncio.run(simulate(PIPETTING.replace("BODY", body), "D1"))
+
+
+def test_the_labs_pipetting_rules():
+    good = pipetting(GOOD_BODY)
+    assert good.ok, good.errors
+    assert "Mix 3× 15 µL in A1 of NEST 96 Well Plate 200 µL Flat" in good.steps
+    assert any(s.startswith("Dispense 10 µL into A1") and s.endswith("(push-out 2 µL)") for s in good.steps)
+
+    # Push-out taken as extra liquid: 12 uL aspirated, 10 + 2 dispensed.
+    extra = pipetting('    p.pick_up_tip()\n    p.aspirate(12, res["A1"])\n'
+                      '    p.dispense(10, plate["A1"].bottom(z=1))\n    p.dispense(2, plate["A1"].bottom(z=1))\n    p.drop_tip()')
+    assert any("never aspirate extra for it" in e and "push-out 0 µL" in e for e in extra.errors), extra.errors
+    assert pipetting('    p.pick_up_tip()\n    p.aspirate(10, res["A1"])\n    p.dispense(10, plate["A1"], push_out=2)\n'
+                     '    p.drop_tip()').ok  # Opentrons dispenses 1 mm above the bottom by default
+    low = pipetting('    p.pick_up_tip()\n    p.aspirate(10, res["A1"])\n    p.dispense(10, plate["A1"].bottom(z=5), push_out=2)\n'
+                    '    p.drop_tip()')
+    assert any("A1 (10 µL at 5.0 mm)" in e for e in low.errors), low.errors
+    big = pipetting('    p.pick_up_tip()\n    p.aspirate(100, res["A3"])\n    p.dispense(100, plate["A1"].bottom(z=1))\n    p.drop_tip()')
+    assert any("from above, 12 mm above the bottom" in e for e in big.errors), big.errors
+
+    # One tip into wells that already hold liquid carries the first well's liquid on.
+    carried = GOOD_BODY.replace('''    for w in ("A1", "A2", "A3"):
+        p.pick_up_tip()
+        p.aspirate(10, res["A2"])
+        p.dispense(10, plate[w].bottom(z=1), push_out=2)
+        p.mix(3, 15, plate[w].bottom(z=1))
+        p.drop_tip()''', '''    p.pick_up_tip()
+    for w in ("A1", "A2", "A3"):
+        p.aspirate(10, res["A2"])
+        p.dispense(10, plate[w].bottom(z=1), push_out=2)
+    p.drop_tip()''')
+    sim = pipetting(carried)
+    # (back to the standard in the reservoir, after going into the diluent in A1)
+    assert any("A1 of NEST 96 Well Plate 200 µL Flat into A2 of NEST 12 Well Reservoir" in e
+               and "take a fresh tip" in e for e in sim.errors), sim.errors
+    # Dispensing one source's liquid into each of three wells that hold liquid, without going back to the source.
+    split = pipetting('    p.pick_up_tip()\n    p.aspirate(30, res["A1"])\n'
+                      '    for w in ("A1", "A2", "A3"):\n        p.dispense(10, plate[w].bottom(z=1), push_out=0 if w != "A3" else 2)\n'
+                      '    p.drop_tip()\n    p.pick_up_tip()\n    p.aspirate(30, res["A2"])\n'
+                      '    for w in ("A1", "A2", "A3"):\n        p.dispense(10, plate[w].bottom(z=1), push_out=2)\n    p.drop_tip()')
+    assert any("A1 of NEST 96 Well Plate 200 µL Flat into A2 of NEST 96 Well Plate 200 µL Flat" in e for e in split.errors), split.errors
+
+    # Below the lab's 1-channel 1000 uL pipette's 2 uL minimum (checked on the robot) the drop stays on the tip.
+    tiny = pipetting('    p.pick_up_tip()\n    p.aspirate(1, res["A2"])\n    p.dispense(1, plate["B1"].bottom(z=1), push_out=2)\n'
+                     '    p.drop_tip()')
+    assert any("The flex_1channel_1000 pipettes 2-1000 µL" in e and "1 µL (A2, B1)" in e and "dilute the stock" in e
+               for e in tiny.errors), tiny.errors
+    assert pipetting('    p.pick_up_tip()\n    p.aspirate(2, res["A2"])\n    p.dispense(2, plate["B1"].bottom(z=1), push_out=2)\n'
+                     '    p.drop_tip()').ok
+    assert "there is no higher minimum" in DeckRules().describe()
+
+    # Under 100 uL of reagent the tip is covered: no push-out is right there (air would bubble the reagent).
+    under = ('    p.pick_up_tip()\n    p.aspirate(100, res["A3"])\n    p.dispense(100, plate["C1"].bottom(z=12))\n    p.drop_tip()\n'
+             '    p.pick_up_tip()\n    p.aspirate(8, res["A2"])\n    p.dispense(8, plate["C1"].bottom(z=1), push_out=0)\n    p.drop_tip()')
+    assert pipetting(under).ok
+    dry = pipetting('    p.pick_up_tip()\n    p.aspirate(8, res["A2"])\n    p.dispense(8, plate["C1"].bottom(z=1), push_out=0)\n'
+                    '    p.drop_tip()')
+    assert any("C1 (8 µL, push-out 0 µL)" in e and "push_out=0 is right" in e for e in dry.errors), dry.errors
+
+    # Small volumes go in small tips: 10 uL from a 1000 uL tip fails, a mix with that tip doesn't.
+    big_tips = PIPETTING.replace("opentrons_flex_96_tiprack_200ul", "opentrons_flex_96_tiprack_1000ul")
+    sim = asyncio.run(simulate(big_tips.replace("BODY", GOOD_BODY), "D1"))
+    assert any("moves less than 50 µL with a 1000 µL tip (10 µL into A1" in e and "pick up 50 µL tips" in e
+               for e in sim.errors), sim.errors
+    assert not any("15 µL" in e for e in sim.errors), sim.errors
+    assert "use the smallest tip that holds the volume" in DeckRules().describe()
+
+    wet = pipetting(GOOD_BODY.replace("    p.drop_tip()\n", "    p.drop_tip()\n    p.transfer(20, res['A1'], plate['B1'], pre_wet=True)\n", 1))
+    assert any("pre-wets tips" in e for e in wet.errors), wet.errors
+    assert "Never pre-wet tips" in DeckRules().describe()
+
+
+def test_a_50_ul_pipette_goes_down_to_1_ul_in_low_volume_mode():
+    code = PIPETTING.replace("opentrons_flex_96_tiprack_200ul", "opentrons_flex_96_tiprack_50ul").replace(
+        'protocol.load_instrument("flex_1channel_1000"', 'protocol.load_instrument("flex_1channel_50"')
+    body = '    p.pick_up_tip()\n    p.aspirate(2, res["A2"])\n    p.dispense(2, plate["B1"].bottom(z=1), push_out=2)\n    p.drop_tip()'
+    default = asyncio.run(simulate(code.replace("BODY", body), "D1"))
+    assert any("The flex_1channel_50 pipettes 5-50 µL" in e and "configure_for_volume" in e for e in default.errors), default.errors
+    low = asyncio.run(simulate(code.replace("BODY", "    p.configure_for_volume(2)\n" + body), "D1"))
+    assert low.ok, low.errors
+
+
+def test_a_tip_spot_is_not_picked_up_twice():
+    # The simulator allows naming the same spot every time; on the robot it is empty the second time.
+    same = pipetting("""
+    for w in ("A1", "A2"):
+        p.pick_up_tip(tips["A1"])
+        p.aspirate(100, res["A3"])
+        p.dispense(100, plate[w].bottom(z=12))
+        p.drop_tip()
+""")
+    assert any("picks up tips again from a spot it already emptied: A1 of" in e for e in same.errors), same.errors
+    # A tip put back (return_tip) may be picked up again.
+    returned = pipetting("""
+    p.pick_up_tip(tips["A1"])
+    p.return_tip()
+    p.pick_up_tip(tips["A1"])
+    p.aspirate(100, res["A3"])
+    p.dispense(100, plate["A1"].bottom(z=12))
+    p.drop_tip()
+""")
+    assert returned.ok, returned.errors
+
+
+def test_small_volumes_may_be_pushed_out_with_2_to_7_ul():
+    # A 2 uL drop stays on a 50 uL tip with 2 uL of push-out and comes off with 5 uL (tested on the lab's Flex).
+    def push(n):
+        return pipetting(f'    p.pick_up_tip()\n    p.aspirate(2, res["A2"])\n'
+                         f'    p.dispense(2, plate["B1"].bottom(z=1), push_out={n})\n    p.drop_tip()')
+    assert push(2).ok and push(5).ok and push(7).ok
+    for bad in (1, 10):
+        sim = push(bad)
+        assert any(f"B1 (2 µL, push-out {bad} µL)" in e and "5 µL with 50 µL tips" in e for e in sim.errors), sim.errors
+    assert "comes off with 5 µL" in DeckRules().describe()
+
+
+SMALL_50 = '''
+from opentrons import protocol_api
+requirements = {"robotType": "Flex", "apiLevel": "%s"}
+
+def run(protocol):
+    protocol.load_waste_chute()
+    tips = protocol.load_labware("opentrons_flex_96_filtertiprack_50ul", "C2")
+    tubes = protocol.load_labware("opentrons_24_tuberack_eppendorf_1.5ml_safelock_snapcap", "B2")
+    plate = protocol.load_labware("corning_96_wellplate_360ul_flat", "C1")
+    p = protocol.load_instrument("flex_1channel_1000", "left", tip_racks=[tips])
+    tubes["A2"].load_liquid(protocol.define_liquid("BSA"), 100)
+BODY
+''' % LATEST
+
+
+def test_small_volumes_with_50_ul_tips_need_the_tested_settings():
+    def run(body):
+        return asyncio.run(simulate(SMALL_50.replace("BODY", body), "C1"))
+
+    # What worked on the lab's Flex: 20 uL/s, a 1 s pause after aspirating, a 5 uL push-out.
+    good = run('''    p.pick_up_tip()
+    for w in ("B1", "B2"):
+        p.flow_rate.aspirate = 20
+        p.flow_rate.dispense = 20
+        p.aspirate(2, tubes["A2"].bottom(z=1))
+        protocol.delay(seconds=1)
+        p.dispense(2, plate[w].bottom(z=1), push_out=5)
+    p.drop_tip()''')
+    assert good.ok, good.errors
+    # What left the drop on the tip: default speed, no pause, 2 uL of push-out.
+    bad = run('''    p.pick_up_tip()
+    p.aspirate(2, tubes["A2"].bottom(z=1))
+    p.dispense(2, plate["B1"].bottom(z=1), push_out=2)
+    p.drop_tip()''')
+    error = next(e for e in bad.errors if e.startswith("Less than 10 µL with 50 µL tips on a 1000 µL pipette"))
+    assert "too fast: 2 µL from A2 at 478 µL/s" in error and "no pause after aspirating: 2 µL from A2" in error
+    assert "push-out under 5 µL: 2 µL into B1 (push-out 2 µL)" in error
+    # 10 uL worked with the defaults, and a mix is not a transfer.
+    assert run('''    p.pick_up_tip()
+    p.aspirate(10, tubes["A2"].bottom(z=1))
+    p.dispense(10, plate["B1"].bottom(z=1), push_out=2)
+    p.mix(3, 8, plate["B1"].bottom(z=1))
+    p.drop_tip()''').ok

@@ -70,6 +70,35 @@ def liquid_protocols(design: Design) -> list:
     return [p for pid in ids if (p := design.protocol(pid)) and p.code]
 
 
+def shared_tubes(design: Design) -> list[str]:
+    """Tubes and wells that two protocols of one run declare with different liquids.
+
+    Each protocol declares what its tubes hold when it starts (load_liquid), so the simulator can't see that
+    a tube an earlier protocol filled or used is declared as something else later: on the deck it is one tube.
+    The sample plate is left out (liquids are meant to build up there)."""
+    first: dict[tuple[str, str, str], tuple[str, str]] = {}  # (slot, load name, well) -> (protocol, liquid)
+    problems = []
+    for p in liquid_protocols(design):
+        if not p.simulation_current:
+            continue
+        deck = p.simulation.deck
+        names = {liquid.id: liquid.name for liquid in deck.liquids}
+        for slot, contents in deck.slots.items():
+            if slot == p.plate_slot:
+                continue
+            for labware in contents.labware:
+                for well, ids in labware.liquids.items():
+                    liquid = " + ".join(sorted(names.get(i, i) for i in ids))
+                    key = (slot, labware.load_name, well)
+                    if key not in first:
+                        first[key] = (p.id, liquid)
+                    elif first[key][1].strip().lower() != liquid.strip().lower():
+                        earlier, what = first[key]
+                        problems.append(f"{well} of the {labware.display_name} in {slot}: '{earlier}' declares it as "
+                                        f"{what}, '{p.id}' as {liquid}")
+    return problems
+
+
 def tips_before(design: Design, protocol_id: str) -> list[list[dict[str, Any]]]:
     """Tip use of the protocols that run before this one in the workflow (they take their tips first)."""
     out = []

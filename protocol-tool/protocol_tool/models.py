@@ -233,6 +233,10 @@ class ProtocolDraft(BaseModel):
     version: int = 0  # bumped each time the code changes
     plate_slot: str = ""  # where the transport places the sample plate on the Flex deck
     simulation: Simulation | None = None
+    # A protocol the scientist gave as it is: the attached file it came from, and the only changes made
+    # to it (labware moved between deck slots). Its lab-rule findings are warnings, not errors.
+    given: str = ""
+    slot_moves: dict[str, str] = Field(default_factory=dict)
 
     @property
     def simulation_current(self) -> bool:
@@ -361,8 +365,8 @@ class Analysis(BaseModel):
                     raise ValueError(f"a {self.fit} fit needs at least {need} standards" + (f" in series '{series}'" if series else "") + f"; got {count}")
             if (self.fit in ("log_linear", "4pl", "5pl") or self.x_log) and any(s.x <= 0 for s in self.standards):
                 raise ValueError(f"x must be above 0 for a {self.fit} fit or a log axis (leave the zero standard out, or use it as a blank)")
-        if self.kind == "standard_curve" and not self.samples:
-            raise ValueError("a standard curve needs samples to read off it")
+        # A standard curve without samples is fine: a plate of standards only still gets its curve,
+        # equation and R² (e.g. checking pipetting accuracy with a BSA series).
         if self.kind == "group_comparison":
             if len(self.samples) < 2:
                 raise ValueError("a group comparison needs at least 2 groups in samples")
@@ -476,6 +480,8 @@ class Session(BaseModel):
     # Claude API conversation, append-only. Never sent to the browser.
     messages: list[dict[str, Any]] = Field(default_factory=list)
     submitted_runs: list[str] = Field(default_factory=list)
+    # Protocol files the scientist attached (name -> text), kept byte for byte for use_given_protocol.
+    files: dict[str, str] = Field(default_factory=dict)
 
     @model_validator(mode="before")
     @classmethod
@@ -483,7 +489,7 @@ class Session(BaseModel):
         return _from_single_protocol(data) if isinstance(data, dict) else data
 
     def view(self) -> dict[str, Any]:
-        data = self.model_dump(mode="json", exclude={"messages"})
+        data = self.model_dump(mode="json", exclude={"messages", "files"})
         data["design"]["protocols"] = [p.view() for p in self.design.protocols]
         data["send_problems"] = self.design.send_problems()
         return data

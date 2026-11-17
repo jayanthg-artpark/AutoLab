@@ -109,6 +109,21 @@ def test_runs_track_tips_and_refuse_when_short(app_with):
         assert wait_for_status(client, run_id, {"succeeded", "failed"})["status"] == "succeeded"
 
 
+def test_with_fresh_racks_every_run_starts_at_a1(app_with, settings):
+    settings.server.fresh_tip_racks = True
+    flex = RecordingFlex()
+    with app_with(flex=flex) as client:
+        two = make_workflow(liquid_step(tips=TIP_USE_40), liquid_step(tips=TIP_USE_40))
+        for _ in range(3):  # 3 x 80 tips: more than one rack, but each run gets a full one
+            run = wait_for_status(client, client.post("/runs", json=two).json()["id"], {"succeeded", "failed"})
+            assert run["status"] == "succeeded", run["error"]
+            # The run's second protocol still continues where its first left the rack.
+            assert "_LAB_TIPS_USED = {'C1': 0}" in flex.sources[-2] and "_LAB_TIPS_USED = {'C1': 40}" in flex.sources[-1]
+        assert client.get("/tips").json()["fresh_each_run"] is True
+        body = {"protocol_b64": "ZGVmIHJ1bihwcm90b2NvbCk6CiAgICBwYXNzCg==", "after": [TIP_USE_40]}
+        assert client.post("/tips/continue", json=body).json()["used"] == {"C1": 40}  # only this run's earlier protocol
+
+
 def test_two_protocols_in_one_run_share_the_racks(app_with):
     flex = RecordingFlex()
     with app_with(flex=flex) as client:

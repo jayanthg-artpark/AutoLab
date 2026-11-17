@@ -40,7 +40,7 @@ def create_app(
     settings = settings or load_settings()
     registry = registry or load_registry(settings.server.instruments)
     store = RunStore(settings.server.database)
-    tips = TipTracker(settings.server.database)
+    tips = TipTracker(settings.server.database, fresh_each_run=settings.server.fresh_tip_racks)
     lab = lab or build_lab(registry, settings.sim.time_scale)
     sequencer = Sequencer(store, lab, registry, tips, hold_scale=hold_scale)
     drivers = {i.id: i.driver for i in registry.instruments}
@@ -179,7 +179,7 @@ def create_app(
     @api.get("/tips")
     async def tip_racks() -> dict[str, Any]:
         """Tip racks on the Flex and how many tips each has left."""
-        return {"racks": [rack.view() for rack in tips.racks()]}
+        return {"racks": [rack.view() for rack in tips.racks()], "fresh_each_run": tips.fresh_each_run}
 
     @api.post("/tips/continue")
     async def continue_tips(body: ContinueTips) -> dict[str, Any]:
@@ -192,7 +192,8 @@ def create_app(
             raise HTTPException(422, str(exc)) from exc
         # Protocols that run before this one: queued runs, and the running run's protocols not started yet.
         pending, queued = [], 0
-        for run in store.list(status=RunStatus.running, limit=5) + list(reversed(store.list(status=RunStatus.queued, limit=1000))):
+        ahead = [] if tips.fresh_each_run else store.list(status=RunStatus.running, limit=5) + list(reversed(store.list(status=RunStatus.queued, limit=1000)))
+        for run in ahead:
             uses = [run.protocol.steps[s.params["op"]].tips for s in run.steps
                     if s.key == "operation" and s.status is StepStatus.pending
                     and run.protocol.steps[s.params["op"]].type == "liquid_handling"]

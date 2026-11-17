@@ -21,8 +21,8 @@
       <h1>Protocol tool</h1>
     </div>
     <nav class="tabs" role="tablist" aria-label="Views">
-      <button type="button" role="tab" id="tab-design" aria-controls="view-design" aria-selected="true">Design</button>
-      <button type="button" role="tab" id="tab-runs" aria-controls="view-runs" aria-selected="false">Runs</button>
+      <button type="button" role="tab" id="tab-design" data-icon="edit" aria-controls="view-design" aria-selected="true">Design</button>
+      <button type="button" role="tab" id="tab-runs" data-icon="runs" aria-controls="view-runs" aria-selected="false">Runs</button>
     </nav>
     <div class="status-group">
       <span class="device" id="claude-chip" hidden></span>
@@ -39,13 +39,13 @@
           <p class="muted small">Describe the experiment or attach a protocol PDF. <span class="assistant-name">The assistant</span> plans the workflow and writes and simulates the Flex protocols.</p>
         </div>
         <div class="head-actions">
-          <button type="button" class="btn ghost small" id="open-designs" title="Reopen a saved design and carry on with its conversation">Designs</button>
-          <button type="button" class="btn ghost small" id="new-design">New design</button>
+          <button type="button" class="btn ghost small" id="open-designs" data-icon="folder" title="Reopen a saved design and carry on with its conversation">Designs</button>
+          <button type="button" class="btn ghost small" id="new-design" data-icon="plus">New design</button>
         </div>
       </div>
       <div class="notice" id="claude-banner" role="alert" hidden>
         <div><strong><span class="assistant-name">The AI model</span> isn't connected.</strong> <span id="claude-banner-text"></span></div>
-        <button type="button" class="btn ghost small" id="claude-recheck">Check again</button>
+        <button type="button" class="btn ghost small" id="claude-recheck" data-icon="refresh">Check again</button>
       </div>
       <div class="messages" id="messages" aria-live="polite"></div>
       <form class="composer" id="composer">
@@ -56,7 +56,7 @@
           </button>
           <input type="file" id="file-input" multiple hidden accept=".pdf,.png,.jpg,.jpeg,.gif,.webp,.txt,.csv,.md,.py,.json">
           <textarea id="chat-input" rows="1" placeholder="e.g. Two-fold serial dilution of a dye across a 96-well plate, then read absorbance at 600 nm" aria-label="Message"></textarea>
-          <button type="submit" class="btn primary" id="send-chat">Send</button>
+          <button type="submit" class="btn primary" id="send-chat" data-icon="send">Send</button>
         </div>
       </form>
     </section>
@@ -90,8 +90,8 @@
           <div class="head-actions">
             <select id="protocol-select" aria-label="Protocol" hidden></select>
             <span id="sim-pill"></span>
-            <button type="button" class="btn ghost small" id="show-steps" disabled>Steps</button>
-            <button type="button" class="btn ghost small" id="show-code" disabled>Code</button>
+            <button type="button" class="btn ghost small" id="show-steps" data-icon="list" disabled>Steps</button>
+            <button type="button" class="btn ghost small" id="show-code" data-icon="code" disabled>Code</button>
           </div>
         </div>
         <div class="deck" id="deck"></div>
@@ -166,8 +166,8 @@
           <p class="form-error wide" id="send-error" role="alert" hidden></p>
           <p class="form-ok wide" id="send-ok" role="status" hidden></p>
           <div class="send-actions wide">
-            <button type="button" class="btn ghost" id="simulate-btn">Run simulation</button>
-            <button type="submit" class="btn primary" id="send-btn">Review plan…</button>
+            <button type="button" class="btn ghost" id="simulate-btn" data-icon="play">Run simulation</button>
+            <button type="submit" class="btn primary" id="send-btn" data-icon="review">Review plan…</button>
           </div>
         </form>
       </section>
@@ -206,21 +206,21 @@
         </div>
         <div class="head-actions">
           <span id="run-status"></span>
-          <button type="button" class="btn ghost" id="open-design-btn" hidden title="Open this run's design on the Design tab, to change it with the AI or send it again">Open in Design</button>
-          <button type="button" class="btn danger" id="abort-btn" hidden>Abort</button>
+          <button type="button" class="btn ghost" id="open-design-btn" data-icon="edit" hidden title="Open this run's design on the Design tab, to change it with the AI or send it again">Open in Design</button>
+          <button type="button" class="btn danger" id="abort-btn" data-icon="stop" hidden>Abort</button>
         </div>
       </div>
       <p class="run-error" id="run-error" hidden></p>
       <div class="notice info" id="manual-move" role="alert" hidden>
         <div><strong>Move the plate by hand.</strong> <span id="manual-move-text"></span></div>
-        <button type="button" class="btn primary small" id="plate-moved">Plate moved</button>
+        <button type="button" class="btn primary small" id="plate-moved" data-icon="check">Plate moved</button>
       </div>
       <ol class="steps" id="steps"></ol>
       <div id="analysis" hidden>
         <div class="panel-head results-head">
           <h3>Analysis</h3>
           <div class="head-actions">
-            <button type="button" class="btn ghost small" id="analysis-csv">Download analysis CSV</button>
+            <button type="button" class="btn ghost small" id="analysis-csv" data-icon="download">Download analysis CSV</button>
           </div>
         </div>
         <div id="analysis-view"></div>
@@ -230,8 +230,8 @@
           <h3>Results</h3>
           <div class="head-actions">
             <select id="measurement" aria-label="Measurement" hidden></select>
-            <button type="button" class="btn ghost small" id="toggle-table" aria-pressed="false">Table</button>
-            <button type="button" class="btn ghost small" id="csv-btn">Download CSV</button>
+            <button type="button" class="btn ghost small" id="toggle-table" data-icon="table" aria-pressed="false">Table</button>
+            <button type="button" class="btn ghost small" id="csv-btn" data-icon="download">Download CSV</button>
           </div>
         </div>
         <div id="plate-view"></div>
@@ -239,7 +239,7 @@
       <div class="explain" id="explain" hidden>
         <div class="panel-head">
           <h3>Summary</h3>
-          <button type="button" class="btn ghost small" id="explain-btn">Explain</button>
+          <button type="button" class="btn ghost small" id="explain-btn" data-icon="sparkle">Explain</button>
         </div>
         <p class="explain-text" id="explain-text"></p>
       </div>
@@ -261,7 +261,7 @@
             placeholder="e.g. the top standard was saturated; start the curve at 1000 µg/mL"></textarea>
         </label>
         <div class="feedback-actions">
-          <button type="submit" class="btn primary small" id="feedback-save" disabled>Save to notebook</button>
+          <button type="submit" class="btn primary small" id="feedback-save" data-icon="book" disabled>Save to notebook</button>
         </div>
       </form>
       <details class="events">
@@ -275,9 +275,9 @@
     <div class="dialog-head">
       <h2 id="code-title">Protocol code</h2>
       <div class="head-actions">
-        <button type="button" class="btn ghost small" id="copy-code">Copy</button>
-        <a class="btn ghost small" id="download-code" download>Download .py</a>
-        <button type="button" class="btn ghost small" data-close>Close</button>
+        <button type="button" class="btn ghost small" id="copy-code" data-icon="copy">Copy</button>
+        <a class="btn ghost small" id="download-code" data-icon="download" download>Download .py</a>
+        <button type="button" class="btn ghost small" data-close data-icon="x">Close</button>
       </div>
     </div>
     <pre class="code" id="code-view"></pre>
@@ -286,7 +286,7 @@
   <dialog id="designs-dialog" class="wide-dialog" aria-labelledby="designs-title">
     <div class="dialog-head">
       <h2 id="designs-title">Saved designs</h2>
-      <button type="button" class="btn ghost small" data-close>Close</button>
+      <button type="button" class="btn ghost small" data-close data-icon="x">Close</button>
     </div>
     <p class="muted small">Every design is saved with its conversation. Open one to carry on where it left off.</p>
     <input type="search" id="designs-filter" class="designs-filter" placeholder="Search by title or first message" aria-label="Search saved designs">
@@ -296,7 +296,7 @@
   <dialog id="steps-dialog" class="wide-dialog" aria-labelledby="steps-title">
     <div class="dialog-head">
       <h2 id="steps-title">Simulated run</h2>
-      <button type="button" class="btn ghost small" data-close>Close</button>
+      <button type="button" class="btn ghost small" data-close data-icon="x">Close</button>
     </div>
     <div id="steps-view"></div>
   </dialog>
@@ -304,7 +304,7 @@
   <dialog id="plan-dialog" class="wide-dialog" aria-labelledby="plan-title">
     <div class="dialog-head">
       <h2 id="plan-title">Review the run</h2>
-      <button type="button" class="btn ghost small" data-close>Close</button>
+      <button type="button" class="btn ghost small" data-close data-icon="x">Close</button>
     </div>
     <p class="muted small" id="plan-intro"></p>
     <ul class="notice-list" id="plan-warnings"></ul>
@@ -315,8 +315,8 @@
     <ol class="steps plan-steps" id="plan-steps"></ol>
     <p class="form-error" id="plan-error" role="alert" hidden></p>
     <div class="send-actions">
-      <button type="button" class="btn ghost" data-close>Back to the design</button>
-      <button type="button" class="btn primary" id="approve-btn">Approve and send to lab</button>
+      <button type="button" class="btn ghost" data-close data-icon="back">Back to the design</button>
+      <button type="button" class="btn primary" id="approve-btn" data-icon="check">Approve and send to lab</button>
     </div>
   </dialog>
 

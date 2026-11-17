@@ -80,6 +80,10 @@ class LabSettings:
     # loads anything else fails the check, since the robot would refuse to start it.
     pipettes: dict[str, str] = field(default_factory=lambda: {"left": "flex_1channel_1000", "right": "flex_8channel_50"})
     gripper: bool = False
+    # Staff put full tip racks on the Flex before every run, so every protocol starts at A1 of each rack
+    # (keep in step with the master node's [server] fresh_tip_racks). false = racks stay between runs and
+    # each run continues the partly used ones.
+    fresh_tip_racks: bool = True
     # Python Protocol API level every protocol must use. "latest" = the newest the installed
     # opentrons package supports; the Flex's robot software must be at least as new.
     api_level: str = "latest"

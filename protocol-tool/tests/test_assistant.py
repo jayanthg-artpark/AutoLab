@@ -259,6 +259,20 @@ def test_the_assistant_is_told_which_tip_racks_are_on_the_deck(settings):
     assert "Lab instruments (registry):\nunknown (the master node can't be reached)" in state
 
 
+def test_with_fresh_racks_every_run_the_assistant_loads_its_own(settings):
+    settings.lab.fresh_tip_racks = True
+
+    async def racks():
+        return [{"slot": "C1", "load_name": "opentrons_flex_96_tiprack_200ul", "remaining": 56}]
+
+    model = FakeModel([("OK.", [], "end_turn")])
+    run_turn(settings, model, tip_racks=racks)
+    state = model.calls[0][0]["content"][0]["text"]
+    assert "Tip racks: full racks every run" in state and "56 of 96" not in state
+    system = Assistant(settings, SessionStore(settings.server.database), model)._system[0]["text"]
+    assert "starts at A1 of its first rack" in system and "Tip racks stay on the Flex" not in system
+
+
 def test_sessions_saved_by_the_older_version_still_load():
     old = {
         "id": "abc", "design": {"title": "Old", "summary": "s", "protocol_code": GOOD_PROTOCOL, "version": 3, "plate_slot": "D2",
@@ -273,3 +287,67 @@ def test_sessions_saved_by_the_older_version_still_load():
     assert session.design.send_problems() == [
         "Protocol 'Old' v3 has changed since its last simulation. Run the simulation."
     ]
+
+
+def test_protocols_are_checked_again_in_run_order(settings):
+    """Each protocol was simulated on its own, but run in order the second one runs out of the tips the first used:
+    setting the workflow (and rewriting the first protocol) checks them again in run order and says so."""
+    from protocol_tool.models import Simulation, code_hash
+    from protocol_tool.workflow import liquid_protocols
+
+    calls = []
+
+    async def simulate_in_order(design, protocol):
+        order = [p.id for p in liquid_protocols(design)]
+        before = order[:order.index(protocol.id)] if protocol.id in order else []
+        calls.append((protocol.id, tuple(before)))
+        ok = not (protocol.id == "two" and "one" in before)
+        return Simulation(code_hash=code_hash(protocol.code), plate_slot=protocol.plate_slot, ok=ok,
+                          errors=[] if ok else ["OutOfTipsError [line 9]: no tips left"])
+
+    model = FakeModel([
+        ("", [tool_use("t1", "write_protocol", protocol_id="one", title="One", summary="s", plate_slot="D2", code=GOOD_PROTOCOL),
+              tool_use("t2", "write_protocol", protocol_id="two", title="Two", summary="s", plate_slot="D2", code=GOOD_PROTOCOL)],
+         "tool_use"),
+        ("", [tool_use("t3", "set_workflow", steps=[{"type": "liquid_handling", "protocol_id": "one"},
+                                                    {"type": "liquid_handling", "protocol_id": "two"}])], "tool_use"),
+        ("", [tool_use("t4", "write_protocol", protocol_id="one", title="One", summary="s2", plate_slot="D2",
+                       code=GOOD_PROTOCOL + "\n")], "tool_use"),
+        ("Done.", [], "end_turn"),
+    ])
+    events, session = run_turn(settings, model, simulate_protocol=simulate_in_order)
+
+    workflow_result = model.calls[2][-1]["content"][0]["content"]
+    assert "These now FAIL:\n- two: OutOfTipsError" in workflow_result
+    assert ("two", ("one",)) in calls
+    rewrite_result = model.calls[3][-1]["content"][0]["content"]
+    assert "Simulation PASSED" in rewrite_result and "- two: OutOfTipsError" in rewrite_result
+    assert not session.design.protocol("two").simulation.ok
+    assert [t["ok"] for t in events[-1]["entry"]["tools"]] == [True, True, False, True]
+    check_history(session.messages)
+
+
+def test_two_protocols_of_a_run_may_not_declare_one_tube_as_two_liquids():
+    from protocol_tool.assistant import STEPS
+    from protocol_tool.models import Deck, Design, Labware, Liquid, ProtocolDraft, Simulation, SlotContents, code_hash
+    from protocol_tool.workflow import shared_tubes
+
+    def protocol(pid, tube_liquid, plate_liquid):
+        deck = Deck(
+            slots={"C1": SlotContents(labware=[Labware(id="t", load_name="opentrons_10_tuberack_falcon_4x50ml_6x15ml_conical",
+                                                       display_name="Falcon rack", liquids={"A3": ["1"]})]),
+                   "B1": SlotContents(labware=[Labware(id="p", load_name="corning_96_wellplate_360ul_flat",
+                                                       display_name="Plate", liquids={"A1": ["2"]})])},
+            liquids=[Liquid(id="1", name=tube_liquid), Liquid(id="2", name=plate_liquid)])
+        code = f"# {pid}"
+        return ProtocolDraft(id=pid, code=code, plate_slot="B1",
+                             simulation=Simulation(code_hash=code_hash(code), plate_slot="B1", ok=True, deck=deck))
+
+    design = Design(protocols=[protocol("wash1", "Wash buffer", "Sample"), protocol("hrp", "Streptavidin-HRP", "Other")],
+                    workflow=STEPS.validate_python([{"type": "liquid_handling", "protocol_id": "wash1"},
+                                                    {"type": "liquid_handling", "protocol_id": "hrp"}]))
+    clashes = shared_tubes(design)
+    # The tube is reported; the sample plate, where liquids are meant to build up, is not.
+    assert clashes == ["A3 of the Falcon rack in C1: 'wash1' declares it as Wash buffer, 'hrp' as Streptavidin-HRP"]
+    design.protocols[1] = protocol("hrp", "wash buffer", "Other")
+    assert shared_tubes(design) == []

@@ -188,3 +188,18 @@ def test_ollama_needs_no_key_and_explains_missing_models():
     down = asyncio.run(OpenAICompatChecker(OLLAMA, models_api(raise_connect=True)).check())
     assert down.state == "unreachable"
     assert "Ollama is not running" in down.detail
+
+
+def test_a_server_that_does_not_list_its_models_is_ready_if_it_answers_a_chat():
+    def server(chat_status):
+        def handler(request: httpx.Request) -> httpx.Response:
+            if request.url.path.endswith("/models"):
+                return httpx.Response(502, text="<html>Bad gateway</html>")
+            assert request.url.path.endswith("/chat/completions")
+            return httpx.Response(chat_status, json={"choices": [{"message": {"content": "Hi"}}]})
+        return httpx.MockTransport(handler)
+
+    ready = asyncio.run(OpenAICompatChecker(OLLAMA, server(200)).check())
+    assert ready.state == "ready" and "doesn't list its models" in ready.detail
+    down = asyncio.run(OpenAICompatChecker(OLLAMA, server(502)).check())
+    assert down.state == "error" and "502" in down.detail

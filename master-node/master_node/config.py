@@ -28,6 +28,9 @@ class ServerSettings:
         default_factory=lambda: ["http://localhost:5500", "http://127.0.0.1:5500"]
     )
     database: str = "master_node.db"
+    # Staff put full tip racks on the Flex before every run, so each run starts at A1 of its racks.
+    # false = racks stay between runs and each run continues where the last one stopped.
+    fresh_tip_racks: bool = True
     # The instrument registry.
     instruments: str = "instruments.toml"
 

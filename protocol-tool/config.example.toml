@@ -47,6 +47,9 @@ thor_slots = ["B1", "B2", "B3", "C1", "C2", "C3", "D1", "D2"]
 blocked_slots = ["A1", "A2"]  # kept empty: no labware, tip racks, modules, fixtures or moves there
 trash_slot = "A3"         # fixed trash bin
 waste_chute_slot = "D3"   # fixed waste chute; "" if the deck has none
+# Staff put full tip racks on the Flex before every run, so every protocol starts at A1 (keep in
+# step with the master node's [server] fresh_tip_racks). false = racks stay and runs continue them.
+fresh_tip_racks = true
 # Python Protocol API level every protocol must use. "latest" = the newest the installed
 # opentrons package supports. The lab always runs the newest Opentrons software:
 # run-protocol-tool.cmd upgrades the package on every start, and the Flex must be kept
